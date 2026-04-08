@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Buscador de Sentencias</title>
+  <style>
+    body{font-family:Arial,sans-serif;max-width:900px;margin:30px auto;padding:0 12px}
+    .card{border:1px solid #ddd;padding:14px;border-radius:10px;margin-bottom:16px}
+    input,select,button{padding:8px;margin:4px}
+    .result{border:1px solid #eee;padding:10px;margin:8px 0;border-radius:8px}
+  </style>
+</head>
+<body>
+  <h1>Buscador semántico de sentencias</h1>
+
+  <div class="card">
+    <h3>Subir sentencias</h3>
+    <select id="organoIngest">
+      <option>Tribunal Superior de Medellín</option>
+      <option>Corte Suprema de Justicia</option>
+      <option>Otro</option>
+    </select>
+    <input type="file" id="pdfs" multiple accept="application/pdf" />
+    <button id="btnIngest">Procesar e indexar</button>
+    <pre id="log"></pre>
+  </div>
+
+  <div class="card">
+    <h3>Buscar</h3>
+    <input id="query" style="width:60%" placeholder="Escribe tu consulta jurídica" />
+    <select id="organoSearch">
+      <option value="TODAS">Todas</option>
+      <option>Tribunal Superior de Medellín</option>
+      <option>Corte Suprema de Justicia</option>
+    </select>
+    <button id="btnSearch">Buscar</button>
+    <div id="results"></div>
+  </div>
+
+<script>
+const log = document.getElementById('log');
+const results = document.getElementById('results');
+
+document.getElementById('btnIngest').onclick = async () => {
+  const files = document.getElementById('pdfs').files;
+  const organo = document.getElementById('organoIngest').value;
+  if (!files.length) return alert('Selecciona PDFs');
+
+  const form = new FormData();
+  form.append('organo', organo);
+  for (const f of files) form.append('pdfs', f);
+
+  log.textContent = 'Procesando...';
+  const r = await fetch('/api/ingest', { method:'POST', body: form });
+  log.textContent = JSON.stringify(await r.json(), null, 2);
+};
+
+document.getElementById('btnSearch').onclick = async () => {
+  const query = document.getElementById('query').value.trim();
+  const organo = document.getElementById('organoSearch').value;
+  if (!query) return;
+
+  results.innerHTML = 'Buscando...';
+  const r = await fetch('/api/search', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ query, organo, limit: 10 })
+  });
+  const data = await r.json();
+  if (!data.results?.length) return results.innerHTML = 'Sin resultados';
+  results.innerHTML = data.results.map(x => `<div class="result"><b>${x.filename}</b> · ${x.organo}<br><small>score ${x.score.toFixed(4)}</small><p>${(x.text||'')}</p></div>`).join('');
+};
+</script>
+</body>
+</html>
