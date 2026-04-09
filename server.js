@@ -3,6 +3,7 @@ import express from 'express';
 import multer from 'multer';
 import pdf from 'pdf-parse';
 import OpenAI from 'openai';
+import Anthropic from '@anthropic-ai/sdk';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import crypto from 'crypto';
 import path from 'path';
@@ -12,8 +13,11 @@ const app = express();
 const port = process.env.PORT || 3000;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 30 * 1024 * 1024 } });
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-const qdrant = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY || undefined });
+const openai    = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const qdrant    = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.env.QDRANT_API_KEY || undefined });
+const anthropic = process.env.ANTHROPIC_API_KEY
+  ? new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+  : null;
 
 const COLLECTION = process.env.QDRANT_COLLECTION || 'sentencias';
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-large';
@@ -47,6 +51,46 @@ function chunkText(text, chunkSize = 500, overlap = 100) {
     start += chunkSize - overlap;
   }
   return chunks;
+}
+
+// Reciprocal Rank Fusion — combina múltiples listas de resultados
+function rrf(lists, k = 60) {
+  const scores = {};
+  for (const list of lists) {
+    list.forEach((item, rank) => {
+      const key = item.document_id || item.filename;
+      if (!scores[key]) scores[key] = { item, s: 0 };
+      scores[key].s += 1 / (k + rank + 1);
+    });
+  }
+  return Object.values(scores).sort((a, b) => b.s - a.s).map(x => x.item);
+}
+
+async function expandQuery(query) {
+  if (!anthropic) throw new Error('ANTHROPIC_API_KEY no configurada');
+  const msg = await anthropic.messages.create({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 500,
+    messages: [{ role: 'user', content:
+      `Eres un experto en derecho colombiano. Dada la siguiente consulta jurídica, genera términos de búsqueda adicionales: sinónimos jurídicos, términos técnicos equivalentes, conceptos relacionados, variantes de redacción en sentencias colombianas.\n\nCONSULTA: "${query}"\n\nResponde SOLO JSON sin markdown: {"expanded_query":"consulta reformulada","keywords":["t1","t2",...]} (10-20 keywords)`
+    }]
+  });
+  return JSON.parse(msg.content[0].text.replace(/```json|```/g, '').trim());
+}
+
+async function rerankWithClaude(query, candidates) {
+  if (!anthropic) throw new Error('ANTHROPIC_API_KEY no configurada');
+  const frags = candidates
+    .map((c, i) => `[${i+1}] ${c.filename}\n${c.text}`)
+    .join('\n\n---\n\n');
+  const msg = await anthropic.messages.create({
+    model: 'claude-sonnet-4-6',
+    max_tokens: 2000,
+    messages: [{ role: 'user', content:
+      `Eres un asistente jurídico experto en derecho colombiano. Evalúa cada fragmento del 1-10 según relevancia para la consulta.\n\nCONSULTA: "${query}"\n\nFRAGMENTOS:\n${frags}\n\nResponde SOLO JSON sin markdown: [{"index":1,"score":9,"reason":"..."},...]`
+    }]
+  });
+  return JSON.parse(msg.content[0].text.replace(/```json|```/g, '').trim());
 }
 
 async function ensureCollection() {
@@ -136,31 +180,73 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { query, organo, limit = 10 } = req.body || {};
+  const { query, organo, limit = 10, advanced = false, rerank = false } = req.body || {};
   if (!query?.trim()) return res.status(400).json({ error: 'La consulta está vacía.' });
 
   try {
     await ensureCollection();
-    const emb = await openai.embeddings.create({
-      model: EMBEDDING_MODEL,
-      input: [query],
-      dimensions: EMBEDDING_DIM
-    });
 
     const filter = organo && organo !== 'TODAS'
       ? { must: [{ key: 'organo', match: { value: organo } }] }
       : undefined;
 
-    const results = await qdrant.search(COLLECTION, {
-      vector: emb.data[0].embedding,
-      limit: Number(limit),
-      filter,
-      with_payload: true
+    // Paso 1: expansión de query (opcional)
+    let expandedData = null;
+    if (advanced && anthropic) {
+      try { expandedData = await expandQuery(query); } catch (_) {}
+    }
+
+    // Paso 2: búsqueda vectorial con query original
+    const emb = await openai.embeddings.create({
+      model: EMBEDDING_MODEL, input: [query], dimensions: EMBEDDING_DIM
     });
+    const raw1 = await qdrant.search(COLLECTION, {
+      vector: emb.data[0].embedding, limit: 50, filter, with_payload: true
+    });
+    const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
+
+    let candidates;
+
+    if (advanced && expandedData?.expanded_query) {
+      // Paso 3: búsqueda con query expandida + RRF
+      const emb2 = await openai.embeddings.create({
+        model: EMBEDDING_MODEL, input: [expandedData.expanded_query], dimensions: EMBEDDING_DIM
+      });
+      const raw2 = await qdrant.search(COLLECTION, {
+        vector: emb2.data[0].embedding, limit: 50, filter, with_payload: true
+      });
+      const list2 = raw2.map(r => ({ score: r.score, ...r.payload }));
+      candidates = rrf([list1, list2]);
+    } else {
+      candidates = list1;
+    }
+
+    // Deduplicar por documento (mejor fragmento por sentencia)
+    const seen = new Set();
+    const unique = candidates.filter(r => {
+      const key = r.document_id || r.filename;
+      if (seen.has(key)) return false;
+      seen.add(key); return true;
+    });
+
+    let results = unique.slice(0, Math.max(Number(limit), 20));
+
+    // Paso 4: re-ranking con Claude (opcional)
+    if (rerank && anthropic && results.length > 0) {
+      try {
+        const top = results.slice(0, 20);
+        const ranks = await rerankWithClaude(query, top);
+        results = top.map((r, i) => {
+          const rank = ranks.find(x => x.index === i + 1);
+          return { ...r, claudeScore: rank?.score ?? 0, claudeReason: rank?.reason ?? '' };
+        }).sort((a, b) => b.claudeScore - a.claudeScore || b.score - a.score);
+      } catch (_) {}
+    }
 
     res.json({
       ok: true,
-      results: results.map(r => ({ score: r.score, ...r.payload }))
+      expanded: expandedData?.keywords || null,
+      results: results.slice(0, Number(limit))
     });
   } catch (e) {
     res.status(500).json({ error: e.message });

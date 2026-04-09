@@ -9,6 +9,15 @@
     .card{border:1px solid #ddd;padding:14px;border-radius:10px;margin-bottom:16px}
     input,select,button{padding:8px;margin:4px}
     .result{border:1px solid #eee;padding:10px;margin:8px 0;border-radius:8px}
+    .toggles{display:flex;gap:20px;align-items:center;margin:8px 4px}
+    .toggles label{display:flex;align-items:center;gap:6px;font-size:0.9em;cursor:pointer}
+    .keywords{background:#f0f7f0;border:1px solid #c3dfc3;border-radius:6px;padding:8px 12px;margin:8px 0;font-size:0.85em;color:#2a5a2a}
+    .score-badge{display:inline-block;padding:1px 7px;border-radius:10px;font-size:0.8em;font-weight:bold}
+    .score-high{background:#d4edda;color:#155724}
+    .score-mid{background:#fff3cd;color:#856404}
+    .score-low{background:#f1f1f1;color:#666}
+    .claude-reason{font-size:0.8em;color:#555;font-style:italic;margin-top:4px}
+    .hint{font-size:0.8em;color:#888;margin:4px 4px 0}
   </style>
 </head>
 <body>
@@ -17,6 +26,7 @@
   <div class="card">
     <h3>Subir sentencias</h3>
     <select id="organoIngest">
+      <option>Sala Civil - Corte Suprema de Justicia</option>
       <option>Tribunal Superior de Medellín</option>
       <option>Corte Suprema de Justicia</option>
       <option>Otro</option>
@@ -28,54 +38,111 @@
 
   <div class="card">
     <h3>Buscar</h3>
-    <input id="query" style="width:60%" placeholder="Escribe tu consulta jurídica" />
-    <select id="organoSearch">
-      <option value="TODAS">Todas</option>
-      <option>Tribunal Superior de Medellín</option>
-      <option>Corte Suprema de Justicia</option>
-    </select>
-    <button id="btnSearch">Buscar</button>
+    <div style="display:flex;gap:4px;flex-wrap:wrap">
+      <input id="query" style="flex:1;min-width:200px" placeholder="Escribe tu consulta jurídica" onkeydown="if(event.key==='Enter')doSearch()" />
+      <select id="organoSearch">
+        <option value="TODAS">Todas</option>
+        <option>Sala Civil - Corte Suprema de Justicia</option>
+        <option>Tribunal Superior de Medellín</option>
+        <option>Corte Suprema de Justicia</option>
+      </select>
+      <button id="btnSearch" onclick="doSearch()">Buscar</button>
+    </div>
+    <div class="toggles">
+      <label><input type="checkbox" id="chkAdvanced"> Búsqueda avanzada <span style="color:#888;font-size:0.85em">(expansión de query + RRF)</span></label>
+      <label><input type="checkbox" id="chkRerank"> Re-ranking con Claude <span style="color:#888;font-size:0.85em">(más preciso, ~$0.03)</span></label>
+    </div>
+    <div class="hint" id="hint"></div>
     <div id="results"></div>
   </div>
 
 <script>
-const log = document.getElementById('log');
-const results = document.getElementById('results');
+const log      = document.getElementById('log');
+const results  = document.getElementById('results');
+const hint     = document.getElementById('hint');
 
 document.getElementById('btnIngest').onclick = async () => {
-  const files = document.getElementById('pdfs').files;
+  const files  = document.getElementById('pdfs').files;
   const organo = document.getElementById('organoIngest').value;
   if (!files.length) return alert('Selecciona PDFs');
-
   const form = new FormData();
   form.append('organo', organo);
   for (const f of files) form.append('pdfs', f);
-
   log.textContent = 'Procesando...';
   const r = await fetch('/api/ingest', { method:'POST', body: form });
   log.textContent = JSON.stringify(await r.json(), null, 2);
 };
 
-document.getElementById('btnSearch').onclick = async () => {
-  const query = document.getElementById('query').value.trim();
-  const organo = document.getElementById('organoSearch').value;
+async function doSearch() {
+  const query    = document.getElementById('query').value.trim();
+  const organo   = document.getElementById('organoSearch').value;
+  const advanced = document.getElementById('chkAdvanced').checked;
+  const rerank   = document.getElementById('chkRerank').checked;
   if (!query) return;
 
-  results.innerHTML = 'Buscando...';
-  const r = await fetch('/api/search', {
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body: JSON.stringify({ query, organo, limit: 10 })
-  });
-  const data = await r.json();
-  if (!data.results?.length) return results.innerHTML = 'Sin resultados';
-  results.innerHTML = data.results.map(x => {
-    const dl = x.file_path
-      ? ` &nbsp;<a href="/api/download?path=${encodeURIComponent(x.file_path)}" target="_blank" style="font-size:0.8em;text-decoration:none">⬇ Descargar PDF</a>`
-      : '';
-    return `<div class="result"><b>${x.filename}</b>${dl} · <em>${x.organo}</em><br><small>score ${x.score.toFixed(4)}</small><p>${x.text||''}</p></div>`;
-  }).join('');
-};
+  const btn = document.getElementById('btnSearch');
+  btn.disabled = true;
+  results.innerHTML = '';
+  hint.textContent  = advanced ? 'Expandiendo consulta con Claude...' : 'Buscando...';
+
+  try {
+    const r    = await fetch('/api/search', {
+      method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ query, organo, limit: 10, advanced, rerank })
+    });
+    const data = await r.json();
+
+    if (!data.ok) { hint.textContent = data.error || 'Error'; return; }
+
+    let html = '';
+
+    if (data.expanded?.length) {
+      html += `<div class="keywords"><b>Términos expandidos:</b> ${data.expanded.map(k => escHtml(k)).join(' · ')}</div>`;
+    }
+
+    if (!data.results?.length) { results.innerHTML = html + '<p>Sin resultados.</p>'; return; }
+
+    html += data.results.map(x => {
+      const dl = x.file_path
+        ? ` &nbsp;<a href="/api/download?path=${encodeURIComponent(x.file_path)}" target="_blank" style="font-size:0.85em">⬇ PDF</a>`
+        : '';
+
+      let badge;
+      if (x.claudeScore !== undefined) {
+        const cls = x.claudeScore >= 7 ? 'score-high' : x.claudeScore >= 4 ? 'score-mid' : 'score-low';
+        badge = `<span class="score-badge ${cls}">${x.claudeScore}/10</span>`;
+      } else {
+        const p = Math.round((x.score || 0) * 100);
+        const cls = p >= 70 ? 'score-high' : p >= 50 ? 'score-mid' : 'score-low';
+        badge = `<span class="score-badge ${cls}">${p}%</span>`;
+      }
+
+      const reason = x.claudeReason
+        ? `<div class="claude-reason">🤖 ${escHtml(x.claudeReason)}</div>` : '';
+
+      return `<div class="result">
+        <div style="display:flex;justify-content:space-between;align-items:flex-start">
+          <div><b>${escHtml(x.filename)}</b>${dl}<br><small style="color:#888">${escHtml(x.organo||'')}</small></div>
+          ${badge}
+        </div>
+        <p style="margin:6px 0 2px;font-size:0.9em;color:#333">${escHtml(x.text||'')}</p>
+        ${reason}
+      </div>`;
+    }).join('');
+
+    results.innerHTML = html;
+    const mode = rerank ? 'Re-ranking · ' : advanced ? 'Avanzada · ' : '';
+    hint.textContent = `${mode}${data.results.length} resultados`;
+  } catch(e) {
+    hint.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+function escHtml(t) {
+  return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 </script>
 </body>
 </html>
