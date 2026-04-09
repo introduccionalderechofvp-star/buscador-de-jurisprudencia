@@ -66,6 +66,34 @@ function rrf(lists, k = 60) {
   return Object.values(scores).sort((a, b) => b.s - a.s).map(x => x.item);
 }
 
+// Extrae palabras clave significativas de la consulta para búsqueda léxica
+function extractKeywords(query) {
+  const stopwords = new Set([
+    'puede', 'como', 'para', 'una', 'que', 'los', 'las', 'del', 'con', 'por',
+    'este', 'esta', 'esto', 'cuando', 'donde', 'cual', 'cuales', 'tiene',
+    'tener', 'hacer', 'haber', 'sido', 'estas', 'estos', 'debe', 'deben',
+    'sobre', 'entre', 'según', 'dicha', 'dicho', 'qué', 'cómo', 'cuál'
+  ]);
+  return query.toLowerCase()
+    .replace(/[¿?¡!.,;:()"]/g, ' ')
+    .split(/\s+/)
+    .filter(w => w.length >= 5 && !stopwords.has(w))
+    .slice(0, 5);
+}
+
+// Crea el índice de texto en Qdrant si no existe (idempotente)
+async function ensureTextIndex() {
+  try {
+    const url = `${process.env.QDRANT_URL || 'http://localhost:6333'}/collections/${COLLECTION}/index`;
+    const headers = { 'Content-Type': 'application/json' };
+    if (process.env.QDRANT_API_KEY) headers['api-key'] = process.env.QDRANT_API_KEY;
+    await fetch(url, {
+      method: 'PUT', headers,
+      body: JSON.stringify({ field_name: 'text', field_schema: 'text' })
+    });
+  } catch (_) {}
+}
+
 async function expandQuery(query) {
   if (!anthropic) throw new Error('ANTHROPIC_API_KEY no configurada');
   const msg = await anthropic.messages.create({
@@ -100,6 +128,7 @@ async function ensureCollection() {
     await qdrant.createCollection(COLLECTION, {
       vectors: { size: EMBEDDING_DIM, distance: 'Cosine' }
     });
+    await ensureTextIndex();
   }
 }
 
@@ -207,22 +236,39 @@ app.post('/api/search', async (req, res) => {
       vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
+    const searchLists = [list1];
 
-    let candidates;
-
+    // Paso 3: búsqueda con query expandida (si advanced)
     if (advanced && expandedData?.expanded_query) {
-      // Paso 3: búsqueda con query expandida + RRF
       const emb2 = await openai.embeddings.create({
         model: EMBEDDING_MODEL, input: [expandedData.expanded_query], dimensions: EMBEDDING_DIM
       });
       const raw2 = await qdrant.search(COLLECTION, {
         vector: emb2.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
       });
-      const list2 = raw2.map(r => ({ score: r.score, ...r.payload }));
-      candidates = rrf([list1, list2]);
-    } else {
-      candidates = list1;
+      searchLists.push(raw2.map(r => ({ score: r.score, ...r.payload })));
     }
+
+    // Paso 4: búsqueda léxica — vectores filtrados por palabras clave (siempre activo)
+    // Garantiza que fragmentos que MENCIONAN los términos entren al pool aunque no ganen semánticamente
+    const keywords = extractKeywords(query);
+    if (keywords.length > 0) {
+      try {
+        const kwMust = [
+          ...(filter?.must || []),
+          { key: 'text', match: { text: keywords.join(' ') } }
+        ];
+        const raw3 = await qdrant.search(COLLECTION, {
+          vector: emb.data[0].embedding,
+          limit: FETCH_LIMIT,
+          filter: { must: kwMust },
+          with_payload: true
+        });
+        if (raw3.length > 0) searchLists.push(raw3.map(r => ({ score: r.score, ...r.payload })));
+      } catch (_) {}
+    }
+
+    const candidates = searchLists.length > 1 ? rrf(searchLists) : list1;
 
     // Deduplicar por documento (mejor fragmento por sentencia)
     const seen = new Set();
