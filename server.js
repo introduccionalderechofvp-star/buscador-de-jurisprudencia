@@ -223,7 +223,7 @@ app.post('/api/search', async (req, res) => {
     // Candidatos por búsqueda: 100 fragmentos → ~60-80 documentos únicos
     const FETCH_LIMIT = 100;
 
-    // Paso 1: expansión de query (opcional)
+    // Paso 1: expansión de query (opcional) — devuelve keywords jurídicos adicionales
     let expandedData = null;
     if (advanced && anthropic) {
       try { expandedData = await expandQuery(query); } catch (_) {}
@@ -237,52 +237,39 @@ app.post('/api/search', async (req, res) => {
       vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
-    const vectorLists = [list1];
 
-    // Paso 3: búsqueda con query expandida (si advanced)
-    if (advanced && expandedData?.expanded_query) {
-      const emb2 = await openai.embeddings.create({
-        model: EMBEDDING_MODEL, input: [expandedData.expanded_query], dimensions: EMBEDDING_DIM
-      });
-      const raw2 = await qdrant.search(COLLECTION, {
-        vector: emb2.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
-      });
-      vectorLists.push(raw2.map(r => ({ score: r.score, ...r.payload })));
-    }
-
-    // Paso 4: búsqueda léxica — vectores filtrados por palabras clave (siempre activo)
-    // Usa 'should' (OR) para que baste con que el fragmento mencione ALGUNA de las palabras
+    // Paso 3: búsqueda léxica con keywords enriquecidas.
+    // En modo avanzado los keywords de Claude se añaden al filtro OR (más sinónimos,
+    // sin segunda búsqueda vectorial que introduciría ruido competitivo).
     let keywordList = null;
     const keywords = extractKeywords(query);
-    if (keywords.length > 0) {
+    const enrichedKw = [...keywords];
+    if (advanced && expandedData?.keywords?.length) {
+      const extra = expandedData.keywords
+        .map(k => k.toLowerCase().replace(/[¿?¡!.,;:()"]/g, ' ').trim())
+        .filter(k => k.length >= 4 && !enrichedKw.includes(k));
+      enrichedKw.push(...extra.slice(0, 10));
+    }
+    if (enrichedKw.length > 0) {
       try {
         const kwFilter = {
-          should: keywords.map(kw => ({ key: 'text', match: { text: kw } })),
+          should: enrichedKw.map(kw => ({ key: 'text', match: { text: kw } })),
           ...(filter?.must?.length ? { must: filter.must } : {})
         };
-        const raw3 = await qdrant.search(COLLECTION, {
+        const rawKw = await qdrant.search(COLLECTION, {
           vector: emb.data[0].embedding,
           limit: FETCH_LIMIT,
           filter: kwFilter,
           with_payload: true
         });
-        if (raw3.length > 0) keywordList = raw3.map(r => ({ score: r.score, ...r.payload }));
+        if (rawKw.length > 0) keywordList = rawKw.map(r => ({ score: r.score, ...r.payload }));
       } catch (_) {}
     }
 
-    // RRF con pesos: la lista léxica tiene más peso (señal lexical confiable),
-    // la query original más que la expandida (la expandida introduce ruido).
-    // Además va PRIMERO para que el fragmento que ve Claude sea el que contiene
-    // las palabras clave, no el de hechos del caso.
-    const allLists = keywordList ? [keywordList, ...vectorLists] : vectorLists;
-    let weights = null;
-    if (keywordList && vectorLists.length === 2) {
-      weights = [2.0, 1.0, 0.5];  // [keyword, original, expandida]
-    } else if (keywordList && vectorLists.length === 1) {
-      weights = [2.0, 1.0];       // [keyword, original]
-    } else if (vectorLists.length === 2) {
-      weights = [1.0, 0.5];       // [original, expandida]
-    }
+    // RRF: keyword list va primero y con más peso para que el fragmento
+    // con coincidencia léxica sea el representante del documento.
+    const allLists = keywordList ? [keywordList, list1] : [list1];
+    const weights  = keywordList ? [2.0, 1.0] : null;
     const candidates = allLists.length > 1 ? rrf(allLists, 60, weights) : list1;
 
     // Deduplicar por documento (mejor fragmento por sentencia)
@@ -293,9 +280,9 @@ app.post('/api/search', async (req, res) => {
       seen.add(key); return true;
     });
 
-    // Pool de re-ranking: más amplio en modo avanzado (3 listas = más competencia en RRF)
-    const poolSize   = advanced ? 50 : 30;
-    const rerankSize = advanced ? 40 : 30;
+    // Pool más amplio en modo avanzado para no descartar candidatos por el límite
+    const poolSize   = advanced ? 80 : 30;
+    const rerankSize = advanced ? 50 : 30;
     let results = unique.slice(0, Math.max(Number(limit), poolSize));
 
     // Re-ranking con Claude (opcional)
