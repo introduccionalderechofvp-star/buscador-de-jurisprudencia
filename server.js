@@ -250,18 +250,19 @@ app.post('/api/search', async (req, res) => {
     }
 
     // Paso 4: búsqueda léxica — vectores filtrados por palabras clave (siempre activo)
+    // Usa 'should' (OR) para que baste con que el fragmento mencione ALGUNA de las palabras
     let keywordList = null;
     const keywords = extractKeywords(query);
     if (keywords.length > 0) {
       try {
-        const kwMust = [
-          ...(filter?.must || []),
-          { key: 'text', match: { text: keywords.join(' ') } }
-        ];
+        const kwFilter = {
+          should: keywords.map(kw => ({ key: 'text', match: { text: kw } })),
+          ...(filter?.must?.length ? { must: filter.must } : {})
+        };
         const raw3 = await qdrant.search(COLLECTION, {
           vector: emb.data[0].embedding,
           limit: FETCH_LIMIT,
-          filter: { must: kwMust },
+          filter: kwFilter,
           with_payload: true
         });
         if (raw3.length > 0) keywordList = raw3.map(r => ({ score: r.score, ...r.payload }));
