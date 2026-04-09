@@ -180,7 +180,7 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { query, organo, limit = 10, advanced = false, rerank = false } = req.body || {};
+  const { query, organo, limit = 15, advanced = false, rerank = false } = req.body || {};
   if (!query?.trim()) return res.status(400).json({ error: 'La consulta está vacía.' });
 
   try {
@@ -189,6 +189,9 @@ app.post('/api/search', async (req, res) => {
     const filter = organo && organo !== 'TODAS'
       ? { must: [{ key: 'organo', match: { value: organo } }] }
       : undefined;
+
+    // Candidatos por búsqueda: 100 fragmentos → ~60-80 documentos únicos
+    const FETCH_LIMIT = 100;
 
     // Paso 1: expansión de query (opcional)
     let expandedData = null;
@@ -201,7 +204,7 @@ app.post('/api/search', async (req, res) => {
       model: EMBEDDING_MODEL, input: [query], dimensions: EMBEDDING_DIM
     });
     const raw1 = await qdrant.search(COLLECTION, {
-      vector: emb.data[0].embedding, limit: 50, filter, with_payload: true
+      vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
 
@@ -213,7 +216,7 @@ app.post('/api/search', async (req, res) => {
         model: EMBEDDING_MODEL, input: [expandedData.expanded_query], dimensions: EMBEDDING_DIM
       });
       const raw2 = await qdrant.search(COLLECTION, {
-        vector: emb2.data[0].embedding, limit: 50, filter, with_payload: true
+        vector: emb2.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
       });
       const list2 = raw2.map(r => ({ score: r.score, ...r.payload }));
       candidates = rrf([list1, list2]);
@@ -229,12 +232,13 @@ app.post('/api/search', async (req, res) => {
       seen.add(key); return true;
     });
 
-    let results = unique.slice(0, Math.max(Number(limit), 20));
+    // Pool de re-ranking: top 30 documentos únicos
+    let results = unique.slice(0, Math.max(Number(limit), 30));
 
     // Paso 4: re-ranking con Claude (opcional)
     if (rerank && anthropic && results.length > 0) {
       try {
-        const top = results.slice(0, 20);
+        const top = results.slice(0, 30);
         const ranks = await rerankWithClaude(query, top);
         results = top.map((r, i) => {
           const rank = ranks.find(x => x.index === i + 1);
