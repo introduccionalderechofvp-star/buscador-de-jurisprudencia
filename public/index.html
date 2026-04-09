@@ -88,7 +88,7 @@ async function doSearch() {
   try {
     const r    = await fetch('/api/search', {
       method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ query, organo, limit: 15, advanced, rerank })
+      body: JSON.stringify({ query, organo, limit: 20, advanced, rerank })
     });
     const data = await r.json();
 
