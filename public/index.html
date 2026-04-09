@@ -69,7 +69,12 @@ document.getElementById('btnSearch').onclick = async () => {
   });
   const data = await r.json();
   if (!data.results?.length) return results.innerHTML = 'Sin resultados';
-  results.innerHTML = data.results.map(x => `<div class="result"><b>${x.filename}</b> · ${x.organo}<br><small>score ${x.score.toFixed(4)}</small><p>${(x.text||'')}</p></div>`).join('');
+  results.innerHTML = data.results.map(x => {
+    const dl = x.file_path
+      ? ` &nbsp;<a href="/api/download?path=${encodeURIComponent(x.file_path)}" target="_blank" style="font-size:0.8em;text-decoration:none">⬇ Descargar PDF</a>`
+      : '';
+    return `<div class="result"><b>${x.filename}</b>${dl} · <em>${x.organo}</em><br><small>score ${x.score.toFixed(4)}</small><p>${x.text||''}</p></div>`;
+  }).join('');
 };
 </script>
 </body>

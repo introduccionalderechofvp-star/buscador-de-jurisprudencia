@@ -5,6 +5,8 @@ import pdf from 'pdf-parse';
 import OpenAI from 'openai';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import crypto from 'crypto';
+import path from 'path';
+import fs from 'fs';
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -16,6 +18,9 @@ const qdrant = new QdrantClient({ url: process.env.QDRANT_URL, apiKey: process.e
 const COLLECTION = process.env.QDRANT_COLLECTION || 'sentencias';
 const EMBEDDING_MODEL = process.env.EMBEDDING_MODEL || 'text-embedding-3-large';
 const EMBEDDING_DIM = Number(process.env.EMBEDDING_DIM || 3072);
+const UPLOADS_DIR = path.join(process.cwd(), 'uploads');
+
+fs.mkdirSync(UPLOADS_DIR, { recursive: true });
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.static('public'));
@@ -54,6 +59,18 @@ async function ensureCollection() {
   }
 }
 
+app.get('/api/download', (req, res) => {
+  const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
+  if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
+  const filePath = path.resolve(UPLOADS_DIR, rel);
+  if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
+    return res.status(403).json({ error: 'Acceso denegado.' });
+  }
+  res.download(filePath, path.basename(filePath), err => {
+    if (err && !res.headersSent) res.status(404).json({ error: 'Archivo no encontrado.' });
+  });
+});
+
 app.get('/api/health', async (_req, res) => {
   try {
     await ensureCollection();
@@ -88,12 +105,14 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
         dimensions: EMBEDDING_DIM
       });
 
+      const filePath = path.join(organo, file.originalname);
       const points = chunks.map((chunk, i) => ({
         id: hashToUUID(`${documentId}:${i}`),
         vector: emb.data[i].embedding,
         payload: {
           document_id: documentId,
           filename: file.originalname,
+          file_path: filePath,
           organo,
           chunk_index: i,
           text: chunk.slice(0, 1200)
@@ -101,6 +120,12 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
       }));
 
       await qdrant.upsert(COLLECTION, { wait: true, points });
+
+      // Persist file to disk so it can be downloaded later
+      const organoDir = path.join(UPLOADS_DIR, organo);
+      fs.mkdirSync(organoDir, { recursive: true });
+      fs.writeFileSync(path.join(organoDir, file.originalname), file.buffer);
+
       summary.push({ file: file.originalname, indexed: points.length, organo });
     }
 
