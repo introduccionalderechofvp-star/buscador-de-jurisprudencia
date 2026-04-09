@@ -236,7 +236,7 @@ app.post('/api/search', async (req, res) => {
       vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
-    const searchLists = [list1];
+    const vectorLists = [list1];
 
     // Paso 3: búsqueda con query expandida (si advanced)
     if (advanced && expandedData?.expanded_query) {
@@ -246,11 +246,11 @@ app.post('/api/search', async (req, res) => {
       const raw2 = await qdrant.search(COLLECTION, {
         vector: emb2.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
       });
-      searchLists.push(raw2.map(r => ({ score: r.score, ...r.payload })));
+      vectorLists.push(raw2.map(r => ({ score: r.score, ...r.payload })));
     }
 
     // Paso 4: búsqueda léxica — vectores filtrados por palabras clave (siempre activo)
-    // Garantiza que fragmentos que MENCIONAN los términos entren al pool aunque no ganen semánticamente
+    let keywordList = null;
     const keywords = extractKeywords(query);
     if (keywords.length > 0) {
       try {
@@ -264,11 +264,14 @@ app.post('/api/search', async (req, res) => {
           filter: { must: kwMust },
           with_payload: true
         });
-        if (raw3.length > 0) searchLists.push(raw3.map(r => ({ score: r.score, ...r.payload })));
+        if (raw3.length > 0) keywordList = raw3.map(r => ({ score: r.score, ...r.payload }));
       } catch (_) {}
     }
 
-    const candidates = searchLists.length > 1 ? rrf(searchLists) : list1;
+    // RRF: la lista léxica va PRIMERO para que el fragmento que ve Claude
+    // sea el que contiene las palabras clave, no el de hechos del caso
+    const allLists = keywordList ? [keywordList, ...vectorLists] : vectorLists;
+    const candidates = allLists.length > 1 ? rrf(allLists) : list1;
 
     // Deduplicar por documento (mejor fragmento por sentencia)
     const seen = new Set();
@@ -281,7 +284,7 @@ app.post('/api/search', async (req, res) => {
     // Pool de re-ranking: top 30 documentos únicos
     let results = unique.slice(0, Math.max(Number(limit), 30));
 
-    // Paso 4: re-ranking con Claude (opcional)
+    // Re-ranking con Claude (opcional)
     if (rerank && anthropic && results.length > 0) {
       try {
         const top = results.slice(0, 30);
