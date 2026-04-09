@@ -24,6 +24,13 @@ function hash(content) {
   return crypto.createHash('sha256').update(content).digest('hex');
 }
 
+// Qdrant only accepts UUIDs or unsigned integers as point IDs.
+// Derive a deterministic UUID v4 from any string.
+function hashToUUID(content) {
+  const h = crypto.createHash('sha256').update(content).digest('hex');
+  return `${h.slice(0,8)}-${h.slice(8,12)}-4${h.slice(13,16)}-${(parseInt(h.slice(16,18),16)&0x3f|0x80).toString(16)}${h.slice(18,20)}-${h.slice(20,32)}`;
+}
+
 function chunkText(text, chunkSize = 500, overlap = 100) {
   const words = text.split(/\s+/).filter(Boolean);
   const chunks = [];
@@ -82,7 +89,7 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
       });
 
       const points = chunks.map((chunk, i) => ({
-        id: hash(`${documentId}:${i}`),
+        id: hashToUUID(`${documentId}:${i}`),
         vector: emb.data[i].embedding,
         payload: {
           document_id: documentId,
