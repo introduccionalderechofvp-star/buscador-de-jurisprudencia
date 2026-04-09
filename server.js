@@ -53,16 +53,17 @@ function chunkText(text, chunkSize = 500, overlap = 100) {
   return chunks;
 }
 
-// Reciprocal Rank Fusion — combina múltiples listas de resultados
-function rrf(lists, k = 60) {
+// Reciprocal Rank Fusion — combina múltiples listas con pesos opcionales
+function rrf(lists, k = 60, weights = null) {
+  const w = weights || lists.map(() => 1);
   const scores = {};
-  for (const list of lists) {
+  lists.forEach((list, i) => {
     list.forEach((item, rank) => {
       const key = item.document_id || item.filename;
       if (!scores[key]) scores[key] = { item, s: 0 };
-      scores[key].s += 1 / (k + rank + 1);
+      scores[key].s += w[i] * (1 / (k + rank + 1));
     });
-  }
+  });
   return Object.values(scores).sort((a, b) => b.s - a.s).map(x => x.item);
 }
 
@@ -269,10 +270,20 @@ app.post('/api/search', async (req, res) => {
       } catch (_) {}
     }
 
-    // RRF: la lista léxica va PRIMERO para que el fragmento que ve Claude
-    // sea el que contiene las palabras clave, no el de hechos del caso
+    // RRF con pesos: la lista léxica tiene más peso (señal lexical confiable),
+    // la query original más que la expandida (la expandida introduce ruido).
+    // Además va PRIMERO para que el fragmento que ve Claude sea el que contiene
+    // las palabras clave, no el de hechos del caso.
     const allLists = keywordList ? [keywordList, ...vectorLists] : vectorLists;
-    const candidates = allLists.length > 1 ? rrf(allLists) : list1;
+    let weights = null;
+    if (keywordList && vectorLists.length === 2) {
+      weights = [2.0, 1.0, 0.5];  // [keyword, original, expandida]
+    } else if (keywordList && vectorLists.length === 1) {
+      weights = [2.0, 1.0];       // [keyword, original]
+    } else if (vectorLists.length === 2) {
+      weights = [1.0, 0.5];       // [original, expandida]
+    }
+    const candidates = allLists.length > 1 ? rrf(allLists, 60, weights) : list1;
 
     // Deduplicar por documento (mejor fragmento por sentencia)
     const seen = new Set();
