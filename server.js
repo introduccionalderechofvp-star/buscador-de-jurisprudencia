@@ -272,13 +272,27 @@ app.post('/api/search', async (req, res) => {
     const weights  = keywordList ? [2.0, 1.0] : null;
     const candidates = allLists.length > 1 ? rrf(allLists, 60, weights) : list1;
 
-    // Deduplicar por documento (mejor fragmento por sentencia)
+    // Índice del fragmento con mayor similitud vectorial por documento (de list1).
+    // Ese fragmento tiene más probabilidad de contener el análisis jurídico relevante
+    // que el de mayor peso léxico (que suele ser el de hechos del caso).
+    const bestVectorFrag = {};
+    for (const item of list1) {
+      const key = item.document_id || item.filename;
+      if (!bestVectorFrag[key] || item.score > bestVectorFrag[key].score) {
+        bestVectorFrag[key] = item;
+      }
+    }
+
+    // Deduplicar por documento. El orden lo determina el RRF (qué documentos incluir),
+    // pero el fragmento mostrado es el de mayor similitud semántica (mejor para re-ranking).
     const seen = new Set();
-    const unique = candidates.filter(r => {
-      const key = r.document_id || r.filename;
-      if (seen.has(key)) return false;
-      seen.add(key); return true;
-    });
+    const unique = candidates
+      .filter(r => {
+        const key = r.document_id || r.filename;
+        if (seen.has(key)) return false;
+        seen.add(key); return true;
+      })
+      .map(r => bestVectorFrag[r.document_id || r.filename] || r);
 
     // Pool más amplio en modo avanzado para no descartar candidatos por el límite
     const poolSize   = advanced ? 80 : 30;
