@@ -282,13 +282,15 @@ app.post('/api/search', async (req, res) => {
       seen.add(key); return true;
     });
 
-    // Pool de re-ranking: top 30 documentos únicos
-    let results = unique.slice(0, Math.max(Number(limit), 30));
+    // Pool de re-ranking: más amplio en modo avanzado (3 listas = más competencia en RRF)
+    const poolSize   = advanced ? 50 : 30;
+    const rerankSize = advanced ? 40 : 30;
+    let results = unique.slice(0, Math.max(Number(limit), poolSize));
 
     // Re-ranking con Claude (opcional)
     if (rerank && anthropic && results.length > 0) {
       try {
-        const top = results.slice(0, 30);
+        const top = results.slice(0, rerankSize);
         const ranks = await rerankWithClaude(query, top);
         results = top.map((r, i) => {
           const rank = ranks.find(x => x.index === i + 1);
