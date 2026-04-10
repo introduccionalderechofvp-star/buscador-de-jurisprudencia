@@ -76,7 +76,9 @@ async function main() {
 
   for (let i = 0; i < allPdfs.length; i++) {
     const filePath = allPdfs[i];
-    process.stdout.write(`\r  Revisando ${fmt(i + 1)}/${fmt(allPdfs.length)}...`);
+    if ((i + 1) % 100 === 0 || i === 0) {
+      log(`  Revisando ${fmt(i + 1)}/${fmt(allPdfs.length)}...`);
+    }
 
     let text = '';
     try {
