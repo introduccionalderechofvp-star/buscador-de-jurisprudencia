@@ -114,7 +114,7 @@ async function rerankWithClaude(query, candidates) {
     .join('\n\n---\n\n');
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 2000,
+    max_tokens: 4096,
     messages: [{ role: 'user', content:
       `Eres un asistente jurídico experto en derecho colombiano. Evalúa cada fragmento del 1-10 según relevancia para la consulta.\n\nCONSULTA: "${query}"\n\nFRAGMENTOS:\n${frags}\n\nResponde SOLO JSON sin markdown: [{"index":1,"score":9,"reason":"..."},...]`
     }]
@@ -296,7 +296,7 @@ app.post('/api/search', async (req, res) => {
 
     // Pool más amplio en modo avanzado para no descartar candidatos por el límite
     const poolSize   = advanced ? 80 : 30;
-    const rerankSize = advanced ? 50 : 30;
+    const rerankSize = advanced ? 35 : 25;
     let results = unique.slice(0, Math.max(Number(limit), poolSize));
 
     // Re-ranking con Claude (opcional)
