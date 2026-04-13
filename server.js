@@ -157,6 +157,32 @@ app.get('/api/download', (req, res) => {
   });
 });
 
+// Devuelve el texto OCR'izado completo de un PDF — para que un LLM pueda
+// leer la sentencia entera, no solo el chunk truncado de la búsqueda.
+app.get('/api/document/text', async (req, res) => {
+  const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
+  if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
+  const filePath = path.resolve(UPLOADS_DIR, rel);
+  if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
+    return res.status(403).json({ error: 'Acceso denegado.' });
+  }
+  try {
+    const buffer = await fs.promises.readFile(filePath);
+    const parsed = await pdf(buffer);
+    const text = (parsed.text || '').trim();
+    res.json({
+      filename:  path.basename(filePath),
+      file_path: rel,
+      organo:    rel.split('/')[0] || null,
+      num_pages: parsed.numpages || 0,
+      num_chars: text.length,
+      full_text: text
+    });
+  } catch (e) {
+    res.status(404).json({ error: `No se pudo leer el archivo: ${e.message}` });
+  }
+});
+
 app.get('/api/health', async (_req, res) => {
   try {
     await ensureCollection();

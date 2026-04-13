@@ -1,0 +1,19 @@
+{
+  "name": "buscador-jurisprudencia-mcp",
+  "version": "1.0.0",
+  "description": "Servidor MCP para conectar LLMs (Claude Desktop, Claude Code, etc.) al buscador semántico de jurisprudencia colombiana.",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "buscador-jurisprudencia-mcp": "./server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
