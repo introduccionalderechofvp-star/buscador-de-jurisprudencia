@@ -30,7 +30,9 @@ const INGEST_LOG2   = path.join(process.cwd(), 'ingest2.log');
 const LISTA_FILE    = path.join(process.cwd(), 'lista-sin-texto.txt');
 const OCR_LOG       = path.join(process.cwd(), 'ocr-saltados.log');
 const MIN_TEXT      = 50;
-const OCR_TIMEOUT   = 300_000;   // 5 min por archivo
+const OCR_TIMEOUT   = 600_000;   // 10 min por archivo (con 1 hilo de tesseract es más lento)
+const PAUSE_MS      = 1000;      // pausa entre archivos (ser "buen vecino" con el CPU)
+const TESSERACT_THREADS = 1;     // limita uso de CPU; evita throttling en VPS compartidos
 
 const FORCE_RESCAN  = process.argv.includes('--rescan');
 
@@ -62,6 +64,10 @@ async function extractText(filePath) {
   } catch {
     return '';
   }
+}
+
+function sleep(ms) {
+  return new Promise(r => setTimeout(r, ms));
 }
 
 // ─── Obtener lista de saltados ────────────────────────────────────────────────
@@ -175,26 +181,58 @@ async function main() {
     log('No hay archivos para procesar.'); return;
   }
 
+  // ── Paso 1.5: pre-filtrar archivos que ya tienen texto (resume support) ───
+  // Si un archivo ya tiene texto extraíble, fue OCR'izado en una corrida
+  // anterior y NO debe reprocesarse. Esto hace el script idempotente.
+  log(`\nVerificando cuáles archivos ya tienen texto (saltando ya procesados)...`);
+  const pending = [];
+  let yaTenian = 0;
+  for (let i = 0; i < sinTexto.length; i++) {
+    if ((i + 1) % 100 === 0) log(`  Revisados ${fmt(i + 1)}/${fmt(sinTexto.length)}...`);
+    const text = await extractText(sinTexto[i]);
+    if (text.length >= MIN_TEXT) {
+      yaTenian++;
+    } else {
+      pending.push(sinTexto[i]);
+    }
+  }
+  log(`  ${fmt(yaTenian)} archivos ya tenían texto: saltados.`);
+  log(`  ${fmt(pending.length)} archivos pendientes de OCR.`);
+
+  if (!pending.length) {
+    log('\nNo hay archivos pendientes. Todo el OCR ya está aplicado.');
+    log('Siguiente paso: node scripts/ingest-bulk.js\n');
+    return;
+  }
+
   // ── Paso 2: aplicar OCR ────────────────────────────────────────────────────
   log(`\n${'─'.repeat(60)}`);
-  log(`Aplicando OCR a ${fmt(sinTexto.length)} archivos...\n`);
+  log(`Aplicando OCR a ${fmt(pending.length)} archivos pendientes...\n`);
+  log(`(Usando ${TESSERACT_THREADS} hilo(s) de tesseract + nice para no saturar el CPU)\n`);
 
   let ok = 0, errores = 0;
   const startTime = Date.now();
 
-  for (let i = 0; i < sinTexto.length; i++) {
-    const filePath  = sinTexto[i];
+  for (let i = 0; i < pending.length; i++) {
+    const filePath  = pending[i];
     const name      = path.basename(filePath);
     const shortName = name.length > 50 ? name.slice(0, 47) + '...' : name;
-    const label     = `[${i + 1}/${sinTexto.length}]`;
+    const label     = `[${i + 1}/${pending.length}]`;
     const tmpPath   = filePath + '.__ocr__.pdf';
 
     log(`${label} ${shortName}`);
 
     try {
+      // nice -n 19   → prioridad mínima (otros procesos pasan primero)
+      // --jobs N     → ocrmypdf usa N workers en paralelo (1 = secuencial)
+      // OMP_NUM_THREADS=1 → tesseract usa 1 hilo OpenMP (no se come todos los núcleos)
       execSync(
-        `ocrmypdf -l spa --force-ocr --output-type pdf "${filePath}" "${tmpPath}"`,
-        { stdio: 'pipe', timeout: OCR_TIMEOUT }
+        `nice -n 19 ocrmypdf -l spa --force-ocr --jobs ${TESSERACT_THREADS} --output-type pdf "${filePath}" "${tmpPath}"`,
+        {
+          stdio: 'pipe',
+          timeout: OCR_TIMEOUT,
+          env: { ...process.env, OMP_NUM_THREADS: String(TESSERACT_THREADS) }
+        }
       );
       const newText = await extractText(tmpPath);
       if (newText.length >= MIN_TEXT) {
@@ -208,15 +246,20 @@ async function main() {
       }
     } catch (e) {
       if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
-      const msg = (e.stderr?.toString() || e.message).split('\n')[0].slice(0, 100);
+      const stderr = e.stderr?.toString() || '';
+      const msg = (stderr || e.message || 'sin mensaje (posible SIGKILL)').split('\n')[0].slice(0, 200);
       log(`  → ERROR: ${msg}`);
       errores++;
     }
+
+    // Pausa corta entre archivos para que el CPU "respire" y evitar throttling
+    if (i + 1 < pending.length) await sleep(PAUSE_MS);
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   log(`\n${'─'.repeat(60)}`);
   log('RESUMEN OCR');
+  log(`  Ya tenían texto      : ${fmt(yaTenian)}`);
   log(`  Procesados con éxito : ${fmt(ok)}`);
   log(`  Errores / ilegibles  : ${fmt(errores)}`);
   log(`  Tiempo               : ${elapsed} min`);
