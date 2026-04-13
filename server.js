@@ -114,12 +114,24 @@ async function rerankWithClaude(query, candidates) {
     .join('\n\n---\n\n');
   const msg = await anthropic.messages.create({
     model: 'claude-sonnet-4-6',
-    max_tokens: 4096,
+    max_tokens: 8192,
     messages: [{ role: 'user', content:
-      `Eres un asistente jurídico experto en derecho colombiano. Evalúa cada fragmento del 1-10 según relevancia para la consulta.\n\nCONSULTA: "${query}"\n\nFRAGMENTOS:\n${frags}\n\nResponde SOLO JSON sin markdown: [{"index":1,"score":9,"reason":"..."},...]`
+      `Eres un asistente jurídico experto en derecho colombiano. Evalúa cada fragmento del 1-10 según relevancia para la consulta.\n\nCONSULTA: "${query}"\n\nFRAGMENTOS:\n${frags}\n\nResponde SOLO JSON compacto sin markdown, sin texto adicional. Usa "i" (índice), "s" (score 1-10) y "r" (razón, MÁXIMO 15 palabras en español):\n[{"i":1,"s":9,"r":"..."},{"i":2,"s":7,"r":"..."},...]`
     }]
   });
-  return JSON.parse(msg.content[0].text.replace(/```json|```/g, '').trim());
+  const raw = msg.content?.[0]?.text?.replace(/```json|```/g, '').trim() || '';
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`Claude JSON malformado (len=${raw.length}, stop=${msg.stop_reason}): ${raw.slice(0, 200)}`);
+  }
+  // Normalizar al formato que espera el caller: {index, score, reason}
+  return parsed.map(x => ({
+    index:  x.i ?? x.index,
+    score:  x.s ?? x.score,
+    reason: x.r ?? x.reason ?? ''
+  }));
 }
 
 async function ensureCollection() {
@@ -226,7 +238,8 @@ app.post('/api/search', async (req, res) => {
     // Paso 1: expansión de query (opcional) — devuelve keywords jurídicos adicionales
     let expandedData = null;
     if (advanced && anthropic) {
-      try { expandedData = await expandQuery(query); } catch (_) {}
+      try { expandedData = await expandQuery(query); }
+      catch (e) { console.error('[expand error]', e.message); }
     }
 
     // Paso 2: búsqueda vectorial con query original
@@ -263,7 +276,7 @@ app.post('/api/search', async (req, res) => {
           with_payload: true
         });
         if (rawKw.length > 0) keywordList = rawKw.map(r => ({ score: r.score, ...r.payload }));
-      } catch (_) {}
+      } catch (e) { console.error('[keyword search error]', e.message); }
     }
 
     // RRF: keyword list va primero y con más peso para que el fragmento
@@ -308,7 +321,9 @@ app.post('/api/search', async (req, res) => {
           const rank = ranks.find(x => x.index === i + 1);
           return { ...r, claudeScore: rank?.score ?? 0, claudeReason: rank?.reason ?? '' };
         }).sort((a, b) => b.claudeScore - a.claudeScore || b.score - a.score);
-      } catch (_) {}
+      } catch (e) {
+        console.error('[rerank error]', e.message);
+      }
     }
 
     res.json({
