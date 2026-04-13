@@ -308,6 +308,16 @@
       opacity: .85;
       line-height: 1.6;
     }
+    .result-text mark,
+    .result-reason mark {
+      background: var(--yellow-bg);
+      color: var(--yellow-text);
+      padding: 0 3px;
+      border-radius: 3px;
+      font-weight: 600;
+      box-decoration-break: clone;
+      -webkit-box-decoration-break: clone;
+    }
     .result-reason {
       font-size: .78rem;
       color: var(--text-muted);
@@ -481,6 +491,8 @@
         return;
       }
 
+      const hl = data.highlights || [];
+
       html += data.results.map(x => {
         const dl = x.file_path
           ? `<a class="result-dl" href="/api/download?path=${encodeURIComponent(x.file_path)}" target="_blank">⬇ PDF</a>`
@@ -497,7 +509,7 @@
         }
 
         const reason = x.claudeReason
-          ? `<div class="result-reason">${escHtml(x.claudeReason)}</div>` : '';
+          ? `<div class="result-reason">${highlightText(x.claudeReason, hl)}</div>` : '';
 
         return `<div class="result">
           <div class="result-header">
@@ -507,7 +519,7 @@
             </div>
             ${badge}
           </div>
-          <div class="result-text">${escHtml(x.text || '')}</div>
+          <div class="result-text">${highlightText(x.text || '', hl)}</div>
           ${reason}
         </div>`;
       }).join('');
@@ -525,6 +537,42 @@
 
   function escHtml(t) {
     return String(t).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  }
+
+  // Resalta coincidencias de `terms` dentro de `text`, tolerante a tildes y mayúsculas.
+  // Siempre escapa HTML antes de envolver con <mark> — sin riesgo de XSS.
+  function highlightText(text, terms) {
+    if (!text) return '';
+    if (!terms?.length) return escHtml(text);
+
+    const vowelMap = { a:'[aáàäâã]', e:'[eéèëê]', i:'[iíìïî]', o:'[oóòöô]', u:'[uúùüû]', n:'[nñ]' };
+    const stripAccents = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const escapeRx = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Normalizamos el término (sin tildes, minúsculas) antes de construir el patrón,
+    // así "obligación" genera un patrón que sí coincide con "OBLIGACIONES" en el texto.
+    const toPattern = term => stripAccents(term.toLowerCase()).split('')
+      .map(c => vowelMap[c] || escapeRx(c)).join('');
+
+    const patterns = terms
+      .filter(t => t && t.length >= 3)
+      .sort((a, b) => b.length - a.length)   // términos largos primero
+      .map(toPattern);
+
+    if (!patterns.length) return escHtml(text);
+
+    const re = new RegExp(`(${patterns.join('|')})`, 'gi');
+
+    let out = '';
+    let lastIndex = 0;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      out += escHtml(text.slice(lastIndex, m.index));
+      out += `<mark>${escHtml(m[0])}</mark>`;
+      lastIndex = m.index + m[0].length;
+      if (m[0].length === 0) re.lastIndex++;   // evita bucle infinito
+    }
+    out += escHtml(text.slice(lastIndex));
+    return out;
   }
 </script>
 </body>

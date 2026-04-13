@@ -326,8 +326,20 @@ app.post('/api/search', async (req, res) => {
       }
     }
 
+    // Términos que el frontend debe resaltar en el texto de cada resultado.
+    // Incluye: keywords significativas del query, palabras del query de ≥4 chars,
+    // y (si hay expansión) las keywords jurídicas de Claude.
+    const queryWords = query.toLowerCase()
+      .replace(/[¿?¡!.,;:()"]/g, ' ')
+      .split(/\s+/)
+      .filter(w => w.length >= 4);
+    const highlights = [...new Set([...enrichedKw, ...queryWords])]
+      .filter(Boolean)
+      .sort((a, b) => b.length - a.length);
+
     res.json({
       ok: true,
+      highlights,
       expanded: expandedData?.keywords || null,
       results: results.slice(0, Number(limit))
     });
