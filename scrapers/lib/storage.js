@@ -80,3 +80,38 @@ export function cleanupTmp(organo) {
 export function relativePath(organo, año, filename) {
   return path.join(safeName(organo), String(año), safeName(filename));
 }
+
+/**
+ * Construye un Set con los nombres de archivo (basename) de todos los PDFs
+ * presentes en cualquier nivel bajo `uploads/<organo>/`.
+ *
+ * Útil para scrapers que necesitan dedup tolerante a estructuras de carpeta
+ * heterogéneas: el corpus puede tener archivos en paths anidados legacy
+ * (ej. <organo>/Sala Civil/2017/*.pdf) mientras que el scraper baja archivos
+ * nuevos a la ruta plana (<organo>/<año>/*.pdf). Con este índice, el scraper
+ * reconoce los existentes sin importar dónde estén.
+ *
+ * El sidecar de macOS (._*.pdf) se ignora automáticamente, igual que en
+ * scripts/ingest-bulk.js.
+ *
+ * @returns {Set<string>} nombres de archivo (no rutas) ya presentes
+ */
+export function buildBasenameIndex(organo) {
+  const base = path.join(UPLOADS_DIR, safeName(organo));
+  const names = new Set();
+  if (!fs.existsSync(base)) return names;
+
+  function walk(dir) {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      // Ignorar sidecars AppleDouble de macOS (consistente con ingest-bulk.js)
+      if (entry.name.startsWith('._')) continue;
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) {
+        names.add(entry.name);
+      }
+    }
+  }
+  walk(base);
+  return names;
+}

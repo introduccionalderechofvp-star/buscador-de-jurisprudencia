@@ -41,7 +41,7 @@ import 'dotenv/config';
 import { parseArgs } from 'node:util';
 
 import { fetchJSON, fetchBuffer, getBudgetStatus } from './lib/http.js';
-import { exists, saveAtomic, cleanupTmp, safeName, relativePath } from './lib/storage.js';
+import { saveAtomic, cleanupTmp, safeName, buildBasenameIndex } from './lib/storage.js';
 import { readState, writeState, acquireLock, releaseLock } from './lib/state.js';
 import { logError } from './lib/errors.js';
 
@@ -137,6 +137,13 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
     console.log(`[${sala}] Limpiados ${tmpRemoved} archivos .tmp huérfanos.`);
   }
 
+  // Índice de archivos ya presentes (en cualquier nivel bajo el organo). Esto
+  // permite que el scraper reconozca archivos bajados históricamente aunque
+  // vivan en subcarpetas legacy distintas a la ruta plana que el scraper usa
+  // para archivos nuevos (ej. <organo>/<año>/<file>.pdf).
+  const existingNames = buildBasenameIndex(organo);
+  console.log(`[${sala}] Índice de archivos existentes: ${existingNames.size} PDFs ya en disco.`);
+
   const prevState = readState(name) || {
     sala,
     docs_historicos: 0,
@@ -188,8 +195,10 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
         const filename = safeName(rawTitle.toLowerCase().endsWith('.pdf') ? rawTitle : rawTitle + '.pdf');
         const año      = String(doc.ano || new Date().getFullYear());
 
-        // Dedup por existencia
-        if (exists(organo, año, filename)) {
+        // Dedup: ¿existe un archivo con este basename en CUALQUIER nivel bajo
+        // el organo? (tolera estructuras de carpeta legacy además de la ruta
+        // plana que usamos para archivos nuevos)
+        if (existingNames.has(filename)) {
           alreadyExists++;
           if (incremental) {
             console.log(`    [existe] ${filename} → early-stop activado`);
@@ -207,6 +216,7 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
             throw new Error('buffer vacío');
           }
           saveAtomic(organo, año, filename, buffer);
+          existingNames.add(filename);     // actualizar índice en vivo
           downloaded++;
           console.log(`    [ok]     ${filename}  (${(buffer.length/1024).toFixed(1)} KB, año ${año})`);
         } catch (e) {
