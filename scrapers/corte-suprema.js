@@ -241,6 +241,53 @@ async function processGroup({ groupKey, group, organo, stateName: scraperName })
     }
   }
 
+  // ── Fallback especulativo a .doc ───────────────────────────────────────────
+  //
+  // Motivación: observación empírica (confirmada por el usuario con la UI de
+  // la CSJ) de que algunas salas tienen sentencias accesibles por URL .doc
+  // aunque la API solo liste .docx en búsquedas genéricas. En particular
+  // Sala Penal: sus .docx listados devuelven 404, pero construir la URL con
+  // extensión .doc en el mismo path sí funciona.
+  //
+  // .doc es el ÚLTIMO recurso — solo si pdf y docx (listados) fallaron, y si
+  // .doc mismo no estaba listado. Esto respeta la preferencia: pdf primero,
+  // docx si pdf falla, doc listado si docx falla, y .doc especulativo solo
+  // si ni siquiera el .doc estaba listado y nada más funcionó.
+  //
+  // Se loggea con la etiqueta `doc*` (asterisco = fallback especulativo).
+  if (!group.doc && (group.docx || group.pdf)) {
+    const sourceDoc   = group.docx || group.pdf;
+    const specPath    = sourceDoc.onlinePath.replace(/\.(pdf|docx)$/i, '.doc');
+
+    try {
+      const buffer = await downloadFile(specPath);
+      if (!buffer || buffer.length === 0) {
+        throw new Error('buffer vacío');
+      }
+      const pdfBuffer = await convertDocxBufferToPdf(buffer, 'doc');
+      const finalFilename = safeName(base + '.pdf');
+      saveAtomic(organo, año, finalFilename, pdfBuffer);
+      return {
+        success: true,
+        formatUsed: 'doc*',       // asterisco indica fallback especulativo
+        converted: true,
+        pdfSize: pdfBuffer.length,
+        filename: finalFilename,
+        año
+      };
+    } catch (e) {
+      errorsPerFormat.push({ fmt: 'doc*', error: e.message });
+      logError(scraperName, {
+        phase:       'speculative-doc',
+        doc_title:   sourceDoc.title,
+        doc_path:    specPath,
+        doc_ano:     sourceDoc.ano,
+        format:      'doc*',
+        error:       e.message
+      });
+    }
+  }
+
   return {
     success: false,
     errors: errorsPerFormat,

@@ -108,6 +108,13 @@ export async function fetchWithRetry(url, options = {}, opts = {}) {
   };
 
   let lastError;
+  // Solo cuentan para el circuit breaker las fallas donde el servidor NO
+  // respondió correctamente (429, 5xx, timeouts, errores de red). Un 4xx
+  // no-429 es una respuesta limpia del servidor indicando "este recurso no
+  // está disponible" — el servidor está sano, solo esta request específica
+  // falló. Contar 4xx como fallos del breaker llevó a bloqueos espurios
+  // cuando ciertas salas (ej. Penal) devuelven muchos 404s por diseño.
+  let wasTransientFailure = false;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     // Timeout por intento
@@ -128,8 +135,9 @@ export async function fetchWithRetry(url, options = {}, opts = {}) {
         return res;
       }
 
-      // 429/5xx → error transitorio, reintenta
+      // 429/5xx → error transitorio del servidor, reintenta
       if (res.status === 429 || res.status >= 500) {
+        wasTransientFailure = true;
         if (attempt < maxAttempts) {
           const wait = backoffDelay(attempt, res.headers.get('Retry-After'));
           console.error(
@@ -143,14 +151,25 @@ export async function fetchWithRetry(url, options = {}, opts = {}) {
         break;
       }
 
-      // 4xx no transitorio → falla inmediata, no reintentes
-      lastError = new Error(`HTTP ${res.status} ${res.statusText}`);
-      break;
+      // 4xx no-429: el servidor respondió limpiamente que el recurso no está.
+      // Eso NO es una falla del servidor — resetea la racha del breaker y
+      // lanza el error inmediatamente sin reintentos (son inútiles aquí).
+      consecutiveFailures = 0;
+      throw new Error(`HTTP ${res.status} ${res.statusText}`);
     } catch (e) {
       clearTimeout(timer);
-      lastError = e;
 
-      // AbortError (timeout) o error de red → reintenta
+      // Si el throw vino de nuestro propio handler de 4xx, propagar sin contar
+      // como fallo transitorio (el breaker ya fue reseteado arriba).
+      if (e.__httpClientError) throw e;
+      if (/^HTTP 4\d\d /.test(e.message) && !e.message.includes(' tras ')) {
+        e.__httpClientError = true;
+        throw e;
+      }
+
+      // Error de red, AbortError (timeout), etc. → transitorio
+      lastError = e;
+      wasTransientFailure = true;
       if (attempt < maxAttempts) {
         const wait = backoffDelay(attempt);
         console.error(
@@ -163,15 +182,18 @@ export async function fetchWithRetry(url, options = {}, opts = {}) {
     }
   }
 
-  // Todos los intentos agotados → registra fallo consecutivo
-  consecutiveFailures++;
-  if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
-    circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
-    console.error(
-      `[http] Circuit breaker ACTIVADO tras ${consecutiveFailures} fallos consecutivos. ` +
-      `Bloqueado por ${CIRCUIT_BREAKER_COOLDOWN_MS / 60_000} min.`
-    );
-    consecutiveFailures = 0;
+  // Solo cuentan para el breaker los fallos transitorios (servidor caído,
+  // sobrecarga, timeouts, red). 4xx no-429 ya salió arriba sin pasar por aquí.
+  if (wasTransientFailure) {
+    consecutiveFailures++;
+    if (consecutiveFailures >= CIRCUIT_BREAKER_THRESHOLD) {
+      circuitOpenUntil = Date.now() + CIRCUIT_BREAKER_COOLDOWN_MS;
+      console.error(
+        `[http] Circuit breaker ACTIVADO tras ${consecutiveFailures} fallos consecutivos. ` +
+        `Bloqueado por ${CIRCUIT_BREAKER_COOLDOWN_MS / 60_000} min.`
+      );
+      consecutiveFailures = 0;
+    }
   }
 
   throw lastError || new Error('Fetch falló sin error específico');
