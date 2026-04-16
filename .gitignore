@@ -1,2 +1,6 @@
 node_modules/
 .env
+
+# Runtime artifacts del módulo scrapers/
+scrapers/state/
+scrapers/errors/
