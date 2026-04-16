@@ -126,6 +126,56 @@ async function downloadFile(onlinePath) {
   }, { timeoutMs: 60_000 });   // archivos pueden ser varios MB, tolerancia mayor
 }
 
+/**
+ * Convierte un onlinePath anidado por magistrado a su forma plana (sala+año).
+ * Ejemplo:
+ *   IN:  /var/www/html/Index/PENAL/2025/Dr. X/Sentencia/SP1148.docx
+ *   OUT: /var/www/html/Index/PENAL/2025/SP1148.docx
+ *
+ * Si el path ya está plano (≤8 segmentos), lo devuelve sin cambios. Robusto:
+ * no depende de conocer la sala — usa los primeros 7 segmentos estructurales
+ * (/var/www/html/Index/<SALA>/<año>) + el filename final.
+ */
+function flattenOnlinePath(onlinePath) {
+  const parts = onlinePath.split('/');
+  if (parts.length <= 8) return onlinePath;
+  const prefix = parts.slice(0, 7).join('/');
+  const filename = parts[parts.length - 1];
+  return `${prefix}/${filename}`;
+}
+
+/**
+ * Wrapper de downloadFile con fallback entre path anidado y plano.
+ *
+ * Primero intenta el onlinePath tal cual (como lo devuelve el GraphQL de la
+ * CSJ). Si falla, reintenta con la versión plana construida sobre la marcha.
+ *
+ * Contexto: la CSJ sirve Civil/Laboral/Tutelas con path anidado por magistrado
+ * (funcionan con el onlinePath tal cual), pero Penal solo responde con el
+ * path plano sin magistrado. El fallback maneja ambos casos sin que el resto
+ * del código tenga que saber qué sala está procesando.
+ *
+ * Si el onlinePath ya estaba plano (sin subcarpetas anidadas), no hay
+ * alternativa que intentar y se propaga el error original sin gastar
+ * una segunda request.
+ */
+async function downloadWithPathFallback(onlinePath) {
+  let firstError;
+  try {
+    return await downloadFile(onlinePath);
+  } catch (e) {
+    firstError = e;
+  }
+  const flat = flattenOnlinePath(onlinePath);
+  if (flat === onlinePath) throw firstError;
+  console.log(`    [path-fallback] nested falló, usando plano`);
+  try {
+    return await downloadFile(flat);
+  } catch (secondError) {
+    throw new Error(`nested: ${firstError.message} | flat: ${secondError.message}`);
+  }
+}
+
 // Extensiones que sabemos procesar. Para cualquier otra, loggeamos y saltamos.
 const SUPPORTED_EXTS = new Set(['pdf', 'docx', 'doc']);
 
@@ -204,7 +254,7 @@ async function processGroup({ groupKey, group, organo, stateName: scraperName })
     if (!group[fmt]) continue;
 
     try {
-      const buffer = await downloadFile(group[fmt].onlinePath);
+      const buffer = await downloadWithPathFallback(group[fmt].onlinePath);
       if (!buffer || buffer.length === 0) {
         throw new Error('buffer vacío');
       }
@@ -265,7 +315,7 @@ async function processGroup({ groupKey, group, organo, stateName: scraperName })
     const specPath    = sourceDoc.onlinePath.replace(/\.(pdf|docx)$/i, '.doc');
 
     try {
-      const buffer = await downloadFile(specPath);
+      const buffer = await downloadWithPathFallback(specPath);
       if (!buffer || buffer.length === 0) {
         throw new Error('buffer vacío');
       }
