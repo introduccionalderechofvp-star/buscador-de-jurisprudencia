@@ -4,3 +4,6 @@ node_modules/
 # Runtime artifacts del módulo scrapers/
 scrapers/state/
 scrapers/errors/
+
+# Runtime state del ingest-bulk (optimización mtime)
+.ingest-state.json

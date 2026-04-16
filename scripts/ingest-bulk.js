@@ -6,13 +6,18 @@
  * - Busca PDFs recursivamente en subcarpetas de año u otras.
  * - Detecta duplicados: omite archivos ya indexados en Qdrant.
  * - Muestra progreso en tiempo real.
+ * - Optimización mtime: salta archivos anteriores a la última corrida
+ *   exitosa sin leerlos ni parsearlos. Acelera cron diario de ~30 min
+ *   a ~segundos cuando solo hay pocos archivos nuevos.
  *
  * Uso:
- *   node scripts/ingest-bulk.js
+ *   node scripts/ingest-bulk.js              # incremental (usa mtime filter)
+ *   node scripts/ingest-bulk.js --force      # procesa TODO, ignora state
  *
  * Opciones de entorno (en .env):
  *   BULK_ORGANO   — fuerza un órgano específico ignorando el nombre de carpeta
  *   BULK_PATH     — procesa solo esta subcarpeta dentro de uploads/
+ *   INGEST_FORCE  — equivalente a --force (true/false)
  */
 
 import 'dotenv/config';
@@ -36,6 +41,27 @@ const CHUNK_SIZE  = 500;
 const CHUNK_OVERLAP = 100;
 const EMB_BATCH   = 20;   // chunks por llamada a OpenAI
 const DELAY_MS    = 150;  // pausa entre lotes (evitar rate-limit)
+
+// ─── Estado persistente (optimización mtime) ──────────────────────────────────
+
+const STATE_FILE  = path.join(process.cwd(), '.ingest-state.json');
+const FORCE_FULL  = process.argv.includes('--force')
+                 || process.env.INGEST_FORCE === 'true';
+
+function loadState() {
+  if (FORCE_FULL) return { last_completed_at: 0 };
+  try {
+    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
+  } catch {
+    return { last_completed_at: 0 };
+  }
+}
+
+function saveState(state) {
+  const tmp = STATE_FILE + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(state, null, 2));
+  fs.renameSync(tmp, STATE_FILE);
+}
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -131,18 +157,49 @@ async function main() {
     process.exit(1);
   }
 
+  const state = loadState();
+  const filterThreshold = state.last_completed_at || 0;
+
   console.log(`\n=== Ingestión masiva ===`);
-  console.log(`Órganos: ${organos.join(', ')}\n`);
+  console.log(`Órganos: ${organos.join(', ')}`);
+  if (FORCE_FULL) {
+    console.log(`Modo:    --force (ignorando state, procesando todo)`);
+  } else if (filterThreshold > 0) {
+    console.log(`Modo:    incremental (salta archivos anteriores al ${new Date(filterThreshold).toISOString()})`);
+  } else {
+    console.log(`Modo:    primera corrida (sin state previo, procesa todo y guarda state al terminar)`);
+  }
+  console.log('');
 
   const startTime = Date.now();
   let totalFiles = 0, totalProcessed = 0, totalSkipped = 0, totalErrors = 0, totalChunks = 0;
+  let totalMtimeSkipped = 0;
 
   for (const organo of organos) {
     const organoDir = path.join(targetDir, organo);
-    const pdfs = findPDFs(organoDir);
+    const allPdfs = findPDFs(organoDir);
+
+    // Filtro por mtime: saltamos archivos anteriores a la última corrida
+    // exitosa (con alta probabilidad ya están indexados). En corridas con
+    // --force, filterThreshold=0 → no se filtra nada.
+    let pdfs = allPdfs;
+    if (filterThreshold > 0) {
+      pdfs = allPdfs.filter(p => {
+        try { return fs.statSync(p).mtimeMs > filterThreshold; }
+        catch { return true; }   // si statSync falla, mejor procesar que perder
+      });
+    }
+    const mtimeSkipped = allPdfs.length - pdfs.length;
+    totalMtimeSkipped += mtimeSkipped;
     totalFiles += pdfs.length;
 
-    console.log(`\n─── ${organo} (${fmt(pdfs.length)} PDFs) ───`);
+    if (mtimeSkipped > 0) {
+      console.log(`\n─── ${organo} (${fmt(pdfs.length)} a procesar de ${fmt(allPdfs.length)} totales, ${fmt(mtimeSkipped)} saltados por mtime) ───`);
+    } else {
+      console.log(`\n─── ${organo} (${fmt(pdfs.length)} PDFs) ───`);
+    }
+
+    if (pdfs.length === 0) continue;
 
     for (let i = 0; i < pdfs.length; i++) {
       const filePath  = pdfs[i];
@@ -230,12 +287,34 @@ async function main() {
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`RESUMEN`);
-  console.log(`  PDFs encontrados : ${fmt(totalFiles)}`);
+  console.log(`  PDFs a procesar  : ${fmt(totalFiles)}`);
+  if (totalMtimeSkipped > 0) {
+    console.log(`  Saltados por mtime: ${fmt(totalMtimeSkipped)}  (archivos antiguos sin leer)`);
+  }
   console.log(`  Procesados       : ${fmt(totalProcessed)}`);
   console.log(`  Ya indexados     : ${fmt(totalSkipped)}`);
   console.log(`  Errores          : ${fmt(totalErrors)}`);
   console.log(`  Fragmentos totales: ${fmt(totalChunks)}`);
   console.log(`  Tiempo           : ${elapsed} min`);
+
+  // Guardar state tras corrida exitosa — próxima corrida salta lo viejo.
+  // Solo guardamos si no hubo --force y si no hubo errores graves (si todos
+  // los archivos fallaron no queremos cachear un state malo que impida retry).
+  const hadHardFailure = totalFiles > 0 && totalProcessed === 0 && totalErrors > 0 && totalSkipped === 0;
+  if (!hadHardFailure) {
+    saveState({
+      last_completed_at: Date.now(),
+      last_resumen: {
+        pdfs_a_procesar: totalFiles,
+        saltados_por_mtime: totalMtimeSkipped,
+        procesados: totalProcessed,
+        ya_indexados: totalSkipped,
+        errores: totalErrors,
+        fragmentos_totales: totalChunks
+      }
+    });
+    console.log(`\n  State guardado en ${path.relative(process.cwd(), STATE_FILE)} — próxima corrida salta archivos anteriores.`);
+  }
 }
 
 main().catch(e => { console.error('\nERROR FATAL:', e.message); process.exit(1); });
