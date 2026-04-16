@@ -163,6 +163,7 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
   let downloaded    = 0;
   let alreadyExists = 0;
   let errors        = 0;
+  let nonPdfSkipped = 0;
   let earlyStop     = false;
 
   try {
@@ -187,8 +188,16 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
       for (const doc of page.searchResults) {
         if (downloaded + alreadyExists >= max) break;
 
-        // Solo PDFs (la API puede devolver otros formatos mezclados)
-        if (!doc.onlinePath?.toLowerCase().endsWith('.pdf')) continue;
+        // Solo PDFs (la API puede devolver .doc/.docx/.rtf mezclados — los
+        // ignoramos porque el ingest solo procesa PDFs). Lo loggeamos para
+        // que no queden items "perdidos" en el conteo frente al total API.
+        if (!doc.onlinePath?.toLowerCase().endsWith('.pdf')) {
+          const ext = doc.onlinePath?.split('.').pop()?.toLowerCase() || 'sin-ext';
+          const shortTitle = (doc.title || doc.onlinePath || '?').slice(0, 60);
+          console.log(`    [skip .${ext}] ${shortTitle}`);
+          nonPdfSkipped++;
+          continue;
+        }
 
         // Normalizar filename: garantizar extensión .pdf, sin caracteres inválidos
         const rawTitle = doc.title || doc.onlinePath.split('/').pop();
@@ -246,11 +255,14 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
       ultima_corrida_descargados: downloaded,
       ultima_corrida_ya_existian: alreadyExists,
       ultima_corrida_errores: errors,
+      ultima_corrida_no_pdf: nonPdfSkipped,
       ultima_corrida_early_stop: earlyStop
     });
 
-    console.log(`\n  ═══ ${sala}: ${downloaded} descargados · ${alreadyExists} ya existían · ${errors} errores${earlyStop ? ' · early-stop' : ''} ═══`);
-    return { sala, downloaded, alreadyExists, errors, earlyStop };
+    const nonPdfSuffix = nonPdfSkipped > 0 ? ` · ${nonPdfSkipped} no-PDF` : '';
+    const earlyStopSuffix = earlyStop ? ' · early-stop' : '';
+    console.log(`\n  ═══ ${sala}: ${downloaded} descargados · ${alreadyExists} ya existían · ${errors} errores${nonPdfSuffix}${earlyStopSuffix} ═══`);
+    return { sala, downloaded, alreadyExists, errors, nonPdfSkipped, earlyStop };
   } finally {
     releaseLock(name);
   }
@@ -307,10 +319,11 @@ async function main() {
 
   // Resumen final
   const totals = summaries.reduce((acc, s) => ({
-    downloaded: acc.downloaded + (s.downloaded || 0),
+    downloaded:    acc.downloaded    + (s.downloaded    || 0),
     alreadyExists: acc.alreadyExists + (s.alreadyExists || 0),
-    errors: acc.errors + (s.errors || 0)
-  }), { downloaded: 0, alreadyExists: 0, errors: 0 });
+    errors:        acc.errors        + (s.errors        || 0),
+    nonPdfSkipped: acc.nonPdfSkipped + (s.nonPdfSkipped || 0)
+  }), { downloaded: 0, alreadyExists: 0, errors: 0, nonPdfSkipped: 0 });
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
 
@@ -321,18 +334,22 @@ async function main() {
     if (s.skipped) {
       console.log(`  ${s.sala.padEnd(10)}  SALTADA (${s.reason})`);
     } else {
+      const nonPdf = s.nonPdfSkipped > 0 ? `  no-PDF: ${String(s.nonPdfSkipped).padStart(2)}` : '';
       console.log(
         `  ${s.sala.padEnd(10)}  descargados: ${String(s.downloaded).padStart(4)}  ` +
         `ya existían: ${String(s.alreadyExists).padStart(4)}  ` +
         `errores: ${String(s.errors).padStart(3)}` +
+        nonPdf +
         (s.earlyStop ? '  [early-stop]' : '')
       );
     }
   }
   console.log('  ─────────────────────────────────────────────────────────────');
+  const nonPdfTotal = totals.nonPdfSkipped > 0 ? `  no-PDF: ${String(totals.nonPdfSkipped).padStart(2)}` : '';
   console.log(`  TOTAL       descargados: ${String(totals.downloaded).padStart(4)}  ` +
               `ya existían: ${String(totals.alreadyExists).padStart(4)}  ` +
-              `errores: ${String(totals.errors).padStart(3)}`);
+              `errores: ${String(totals.errors).padStart(3)}` +
+              nonPdfTotal);
   console.log(`  Tiempo: ${elapsed} min`);
 
   // Exit code según resultado:
