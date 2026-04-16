@@ -29,6 +29,11 @@
  *   --magistrado <nombre>                   default: "" (todos)
  *   --max <N>                               default: 10000 (ilimitado práctico)
  *   --ad-hoc                                default: false (modo incremental)
+ *   --no-abort                              default: false — desactiva el
+ *                                           circuit breaker por sala (sigue
+ *                                           paginando aun con 20+ errores
+ *                                           consecutivos). Uso diagnóstico
+ *                                           para explorar salas problemáticas.
  *
  * Salida:
  *   - PDFs guardados en uploads/Sala <sala> - Corte Suprema de Justicia/<año>/
@@ -297,7 +302,7 @@ async function processGroup({ groupKey, group, organo, stateName: scraperName })
 
 // ─── Lógica principal por sala ────────────────────────────────────────────────
 
-async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
+async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAbort = false }) {
   const organo = organoName(sala);
   const name   = stateName(sala);
 
@@ -422,10 +427,14 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
 
           // Circuit breaker por sala: muchos errores consecutivos sugieren
           // que la sala entera está rota (ej. PDFs 404 sistemáticos).
-          if (consecutiveErrors >= CONSECUTIVE_ERROR_LIMIT) {
+          // Deshabilitado si noAbort=true (modo diagnóstico).
+          if (consecutiveErrors >= CONSECUTIVE_ERROR_LIMIT && !noAbort) {
             console.log(`  [abort sala] ${consecutiveErrors} errores consecutivos — abortando ${sala}`);
             abortedBySala = true;
             break;
+          }
+          if (consecutiveErrors === CONSECUTIVE_ERROR_LIMIT && noAbort) {
+            console.log(`  [no-abort] ${consecutiveErrors} errores consecutivos — continuando por flag --no-abort`);
           }
         }
 
@@ -497,7 +506,8 @@ export async function run({
   ano = '',
   magistrado = '',
   max = 10_000,
-  incremental = true
+  incremental = true,
+  noAbort = false
 } = {}) {
   // Validación temprana
   for (const s of salas) {
@@ -511,14 +521,14 @@ export async function run({
   console.log('  Scraper — Corte Suprema de Justicia');
   console.log('═══════════════════════════════════════════════════════════════');
   console.log(`  Salas: ${salas.join(', ')}`);
-  console.log(`  Modo:  ${incremental ? 'incremental' : 'ad-hoc'}`);
+  console.log(`  Modo:  ${incremental ? 'incremental' : 'ad-hoc'}${noAbort ? '  [NO-ABORT: circuit breaker por sala desactivado]' : ''}`);
   console.log(`  Max por sala: ${max}`);
   const budget = getBudgetStatus();
   console.log(`  Presupuesto HTTP hoy: ${budget.requests}/${budget.limit}`);
 
   const summaries = [];
   for (const sala of salas) {
-    const summary = await scrapeSala({ sala, query, ano, magistrado, max, incremental });
+    const summary = await scrapeSala({ sala, query, ano, magistrado, max, incremental, noAbort });
     summaries.push(summary);
   }
 
@@ -578,12 +588,13 @@ export function printSummary({ summaries, totals, elapsedMs }) {
 async function runCLI() {
   const { values } = parseArgs({
     options: {
-      sala:       { type: 'string' },
-      query:      { type: 'string', default: 'a' },
-      ano:        { type: 'string', default: '' },
-      magistrado: { type: 'string', default: '' },
-      max:        { type: 'string', default: '10000' },
-      'ad-hoc':   { type: 'boolean', default: false }
+      sala:        { type: 'string' },
+      query:       { type: 'string', default: 'a' },
+      ano:         { type: 'string', default: '' },
+      magistrado:  { type: 'string', default: '' },
+      max:         { type: 'string', default: '10000' },
+      'ad-hoc':    { type: 'boolean', default: false },
+      'no-abort':  { type: 'boolean', default: false }
     }
   });
 
@@ -593,7 +604,8 @@ async function runCLI() {
     ano:         values.ano,
     magistrado:  values.magistrado,
     max:         Number(values.max),
-    incremental: !values['ad-hoc']
+    incremental: !values['ad-hoc'],
+    noAbort:     values['no-abort']
   });
 
   printSummary(result);
