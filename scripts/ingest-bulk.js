@@ -64,6 +64,8 @@ function chunkText(text) {
 function findPDFs(dir) {
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    // Ignorar sidecars AppleDouble de macOS (._*) — son metadata, no PDFs reales
+    if (entry.name.startsWith('._')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) results.push(...findPDFs(full));
     else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) results.push(full);
