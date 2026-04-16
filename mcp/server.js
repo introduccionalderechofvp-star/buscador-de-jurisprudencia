@@ -87,9 +87,17 @@ const TOOLS = [
         organo: {
           type: 'string',
           description:
-            'Opcional. Filtra por órgano judicial (debe coincidir con el nombre exacto ' +
-            'usado en la indexación, ej. "Sala Civil - Corte Suprema de Justicia" o ' +
-            '"Tribunal Superior de Medellín"). Omitir para buscar en todos los órganos.',
+            'Opcional. Filtra por órgano judicial. Debe coincidir EXACTAMENTE con el ' +
+            'nombre usado en la indexación. Valores conocidos actualmente:\n' +
+            '  - "Sala Civil - Corte Suprema de Justicia"\n' +
+            '  - "Sala Laboral - Corte Suprema de Justicia"\n' +
+            '  - "Sala Penal - Corte Suprema de Justicia"\n' +
+            '  - "Sala Tutelas - Corte Suprema de Justicia"\n' +
+            '  - "Sala Civil - Tribunal Superior de Medellín"\n' +
+            '  - "Sala Laboral - Tribunal Superior de Medellín"\n' +
+            '  - "Sala Penal - Tribunal Superior de Medellín"\n' +
+            'Omitir para buscar en todos los órganos. Si no sabes qué valor usar, ' +
+            'primero busca sin filtro y revisa el campo "organo" en los resultados.',
         },
         limit: {
           type: 'number',
