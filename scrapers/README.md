@@ -139,6 +139,30 @@ Consume la API GraphQL pública de consulta de providencias. Soporta las 4
 salas: **Civil, Laboral, Penal, Tutelas**. Clasifica automáticamente por año
 usando el metadata del API.
 
+**Soporte multi-formato (.pdf / .docx / .doc)**: la CSJ publica algunas
+providencias solo en `.docx` (notablemente Sala Penal). El scraper agrupa
+los resultados de cada página por basename, intenta primero el `.pdf` nativo,
+y si falla (404 u otro) hace fallback al `.docx` o `.doc` convirtiéndolo a
+PDF con LibreOffice. El archivo final **siempre es `<basename>.pdf`**, así
+que el corpus queda homogéneo y el resto del pipeline (ingest, MCP, buscador)
+no necesita saber que hubo conversión.
+
+Requisito para el fallback: LibreOffice instalado en el sistema.
+
+```bash
+apt-get install -y libreoffice-core libreoffice-writer
+```
+
+**Dedup cross-format**: el índice de archivos existentes lee `.pdf`, `.docx`,
+y `.doc` de cualquier nivel bajo `uploads/<organo>/`, normalizando al basename
+lowercase. Si el corpus legacy tiene `SC1234.docx` y el API devuelve el mismo
+SC1234 en cualquier formato, se detecta como existente y se salta.
+
+**Circuit breaker por sala**: tras 20 errores consecutivos al procesar
+entradas (todos los formatos fallaron), se aborta esa sala y se continúa con
+la siguiente. Protege contra casos donde una sala está temporalmente rota
+sin detener el cron completo.
+
 Dos modos de uso:
 
 ```bash

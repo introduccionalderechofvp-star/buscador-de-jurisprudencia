@@ -45,6 +45,7 @@ import { fetchJSON, fetchBuffer, getBudgetStatus } from './lib/http.js';
 import { saveAtomic, cleanupTmp, safeName, buildBasenameIndex } from './lib/storage.js';
 import { readState, writeState, acquireLock, releaseLock } from './lib/state.js';
 import { logError } from './lib/errors.js';
+import { convertDocxBufferToPdf } from './lib/docx.js';
 
 // ─── Constantes del API ───────────────────────────────────────────────────────
 
@@ -112,12 +113,139 @@ async function searchPage({ query, sala, start, magistrado, ano }) {
   return result;
 }
 
-async function downloadPdf(onlinePath) {
+async function downloadFile(onlinePath) {
   return fetchBuffer(API_DOWNLOAD, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: onlinePath })
-  }, { timeoutMs: 60_000 });   // PDFs pueden ser más grandes, tolerancia mayor
+  }, { timeoutMs: 60_000 });   // archivos pueden ser varios MB, tolerancia mayor
+}
+
+// Extensiones que sabemos procesar. Para cualquier otra, loggeamos y saltamos.
+const SUPPORTED_EXTS = new Set(['pdf', 'docx', 'doc']);
+
+// Orden de preferencia: PDF nativo primero (cero conversión), luego DOCX, luego
+// DOC. Si un formato falla (404, error de conversión, etc.), probamos el siguiente.
+const FORMAT_PRIORITY = ['pdf', 'docx', 'doc'];
+
+// Umbral de errores consecutivos para abortar una sala. Protege contra escenarios
+// como Sala Penal, donde la API lista PDFs que devuelven 404 sistemáticamente.
+const CONSECUTIVE_ERROR_LIMIT = 20;
+
+function extractExt(onlinePath) {
+  const m = onlinePath?.match(/\.([a-z0-9]+)$/i);
+  return m ? m[1].toLowerCase() : null;
+}
+
+function extractBasename(doc) {
+  // Priorizar title, fallback al basename del onlinePath
+  const raw = doc.title || doc.onlinePath?.split('/').pop() || '';
+  return raw.replace(/\.(pdf|docx?)$/i, '').trim();
+}
+
+/**
+ * Agrupa los resultados de una página por basename (sin extensión), indexando
+ * por formato disponible. Permite tratar una sentencia publicada en varios
+ * formatos como UN solo candidato con múltiples opciones de descarga.
+ *
+ * @returns {{ groups: Map<string, {pdf?, docx?, doc?, año}>, unsupported: number }}
+ */
+function groupResultsByBasename(searchResults) {
+  const groups = new Map();
+  let unsupported = 0;
+
+  for (const doc of searchResults) {
+    const ext = extractExt(doc.onlinePath);
+    if (!ext || !SUPPORTED_EXTS.has(ext)) {
+      const shortTitle = (doc.title || doc.onlinePath || '?').slice(0, 60);
+      console.log(`    [skip .${ext || '??'}] ${shortTitle}`);
+      unsupported++;
+      continue;
+    }
+
+    const base = extractBasename(doc);
+    if (!base) continue;
+
+    // Usamos el basename lowercased como clave, para comparación
+    // case-insensitive con el índice del disco
+    const key = base.toLowerCase();
+    if (!groups.has(key)) {
+      groups.set(key, { base, año: String(doc.ano || new Date().getFullYear()) });
+    }
+    // Preferir la primera ocurrencia si el API devuelve duplicados del mismo formato
+    const slot = groups.get(key);
+    if (!slot[ext]) slot[ext] = doc;
+  }
+
+  return { groups, unsupported };
+}
+
+/**
+ * Intenta procesar una entrada agrupada: descarga en orden de preferencia
+ * (pdf → docx → doc), convierte si es necesario, y guarda como <base>.pdf.
+ *
+ * Estrategia ante fallos:
+ *   - 404 en un formato → intenta el siguiente formato disponible
+ *   - Otro error en descarga o conversión → loguea y prueba siguiente formato
+ *   - Si TODOS los formatos fallan, retorna { success: false }
+ *
+ * @returns {Promise<{success, formatUsed?, converted?, pdfSize?, errorMessage?}>}
+ */
+async function processGroup({ groupKey, group, organo, stateName: scraperName }) {
+  const { base, año } = group;
+  const errorsPerFormat = [];
+
+  for (const fmt of FORMAT_PRIORITY) {
+    if (!group[fmt]) continue;
+
+    try {
+      const buffer = await downloadFile(group[fmt].onlinePath);
+      if (!buffer || buffer.length === 0) {
+        throw new Error('buffer vacío');
+      }
+
+      let pdfBuffer;
+      let converted = false;
+      if (fmt === 'pdf') {
+        pdfBuffer = buffer;
+      } else {
+        // .docx o .doc → convertir a PDF con LibreOffice
+        pdfBuffer = await convertDocxBufferToPdf(buffer, fmt);
+        converted = true;
+      }
+
+      const finalFilename = safeName(base + '.pdf');
+      saveAtomic(organo, año, finalFilename, pdfBuffer);
+      return {
+        success: true,
+        formatUsed: fmt,
+        converted,
+        pdfSize: pdfBuffer.length,
+        filename: finalFilename,
+        año
+      };
+    } catch (e) {
+      errorsPerFormat.push({ fmt, error: e.message });
+      logError(scraperName, {
+        phase: fmt === 'pdf' ? 'download' : 'download+convert',
+        doc_title: group[fmt].title,
+        doc_path:  group[fmt].onlinePath,
+        doc_ano:   group[fmt].ano,
+        format:    fmt,
+        error:     e.message
+      });
+      // Si el error es 404 y hay un formato alternativo, seguimos con él
+      // silenciosamente. Para cualquier otro error, también reintentamos con
+      // el siguiente formato (más defensivo que abortar).
+      continue;
+    }
+  }
+
+  return {
+    success: false,
+    errors: errorsPerFormat,
+    errorMessage: errorsPerFormat.map(e => `${e.fmt}:${e.error}`).join(' | ')
+  };
 }
 
 // ─── Lógica principal por sala ────────────────────────────────────────────────
@@ -138,12 +266,21 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
     console.log(`[${sala}] Limpiados ${tmpRemoved} archivos .tmp huérfanos.`);
   }
 
-  // Índice de archivos ya presentes (en cualquier nivel bajo el organo). Esto
-  // permite que el scraper reconozca archivos bajados históricamente aunque
-  // vivan en subcarpetas legacy distintas a la ruta plana que el scraper usa
-  // para archivos nuevos (ej. <organo>/<año>/<file>.pdf).
-  const existingNames = buildBasenameIndex(organo);
-  console.log(`[${sala}] Índice de archivos existentes: ${existingNames.size} PDFs ya en disco.`);
+  // Índice de basenames (sin extensión, lowercase) ya presentes en disco bajo
+  // el organo — detecta .pdf, .docx y .doc. Permite dedup cross-format y
+  // tolerante a estructuras legacy nested.
+  //
+  // CLAVE: este índice es un SNAPSHOT INMUTABLE del estado del disco al
+  // arrancar la corrida. NO se actualiza durante el scraping. Sirve solo
+  // para detectar sentencias PRE-EXISTENTES (que disparan early-stop).
+  const existingBeforeRun = buildBasenameIndex(organo);
+  console.log(`[${sala}] Índice de archivos existentes: ${existingBeforeRun.size} basenames ya en disco.`);
+
+  // Set aparte para tracking de lo que descargamos en ESTA corrida. Dedup
+  // contra duplicados devueltos por la API en la misma corrida, pero NO
+  // dispara early-stop (los duplicados de la API no significan que "ya
+  // alcanzamos el corpus anterior").
+  const downloadedThisRun = new Set();
 
   const prevState = readState(name) || {
     sala,
@@ -159,16 +296,19 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
     console.log(`  Última corrida exitosa: ${prevState.ultima_corrida_exitosa} (${prevState.ultima_corrida_descargados} docs)`);
   }
 
-  let start         = 0;
-  let total         = Infinity;
-  let downloaded    = 0;
-  let alreadyExists = 0;
-  let errors        = 0;
-  let nonPdfSkipped = 0;
-  let earlyStop     = false;
+  let start              = 0;
+  let total              = Infinity;
+  let downloaded         = 0;
+  let alreadyExists      = 0;
+  let errors             = 0;
+  let unsupportedSkipped = 0;
+  let dupInRun           = 0;
+  let earlyStop          = false;
+  let abortedBySala      = false;
+  let consecutiveErrors  = 0;
 
   try {
-    while (downloaded + alreadyExists < max && start < total && !earlyStop) {
+    while (downloaded + alreadyExists < max && start < total && !earlyStop && !abortedBySala) {
       let page;
       try {
         page = await searchPage({ query, sala, start, magistrado, ano });
@@ -186,59 +326,60 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
       const pageNum = start / RESULTS_PER_PAGE + 1;
       console.log(`  Página ${pageNum}: ${page.searchResults.length} resultados (total API: ${total})`);
 
-      for (const doc of page.searchResults) {
+      // Agrupa los resultados de la página por basename, unificando pdf/docx/doc
+      const { groups, unsupported } = groupResultsByBasename(page.searchResults);
+      unsupportedSkipped += unsupported;
+
+      for (const [groupKey, group] of groups) {
         if (downloaded + alreadyExists >= max) break;
 
-        // Solo PDFs (la API puede devolver .doc/.docx/.rtf mezclados — los
-        // ignoramos porque el ingest solo procesa PDFs). Lo loggeamos para
-        // que no queden items "perdidos" en el conteo frente al total API.
-        if (!doc.onlinePath?.toLowerCase().endsWith('.pdf')) {
-          const ext = doc.onlinePath?.split('.').pop()?.toLowerCase() || 'sin-ext';
-          const shortTitle = (doc.title || doc.onlinePath || '?').slice(0, 60);
-          console.log(`    [skip .${ext}] ${shortTitle}`);
-          nonPdfSkipped++;
-          continue;
-        }
-
-        // Normalizar filename: garantizar extensión .pdf, sin caracteres inválidos
-        const rawTitle = doc.title || doc.onlinePath.split('/').pop();
-        const filename = safeName(rawTitle.toLowerCase().endsWith('.pdf') ? rawTitle : rawTitle + '.pdf');
-        const año      = String(doc.ano || new Date().getFullYear());
-
-        // Dedup: ¿existe un archivo con este basename en CUALQUIER nivel bajo
-        // el organo? (tolera estructuras de carpeta legacy además de la ruta
-        // plana que usamos para archivos nuevos)
-        if (existingNames.has(filename)) {
+        // 1. ¿Ya existía antes de esta corrida? → dispara early-stop (incremental)
+        if (existingBeforeRun.has(groupKey)) {
           alreadyExists++;
           if (incremental) {
-            console.log(`    [existe] ${filename} → early-stop activado`);
+            console.log(`    [existe] ${group.base} → early-stop activado`);
             earlyStop = true;
             break;
           }
-          console.log(`    [skip]   ya existe: ${filename}`);
+          console.log(`    [skip]   ya existe: ${group.base}`);
           continue;
         }
 
-        // Descargar
-        try {
-          const buffer = await downloadPdf(doc.onlinePath);
-          if (!buffer || buffer.length === 0) {
-            throw new Error('buffer vacío');
-          }
-          saveAtomic(organo, año, filename, buffer);
-          existingNames.add(filename);     // actualizar índice en vivo
+        // 2. ¿Ya lo descargamos en ESTA misma corrida? (API a veces duplica) → skip silencioso
+        if (downloadedThisRun.has(groupKey)) {
+          dupInRun++;
+          continue;
+        }
+
+        // 3. Intentar descargar/convertir en orden de preferencia
+        const result = await processGroup({
+          groupKey,
+          group,
+          organo,
+          stateName: name
+        });
+
+        if (result.success) {
           downloaded++;
-          console.log(`    [ok]     ${filename}  (${(buffer.length/1024).toFixed(1)} KB, año ${año})`);
-        } catch (e) {
+          downloadedThisRun.add(groupKey);
+          consecutiveErrors = 0;   // éxito rompe la racha
+
+          const label = result.converted
+            ? `[ok ${result.formatUsed}→pdf]`
+            : `[ok ${result.formatUsed}]`;
+          console.log(`    ${label.padEnd(15)} ${result.filename}  (${(result.pdfSize/1024).toFixed(1)} KB, año ${result.año})`);
+        } else {
           errors++;
-          logError(name, {
-            phase: 'download',
-            doc_title: doc.title,
-            doc_path: doc.onlinePath,
-            doc_ano: doc.ano,
-            error: e.message
-          });
-          console.log(`    [err]    ${filename}: ${e.message}`);
+          consecutiveErrors++;
+          console.log(`    [err]    ${group.base}: ${result.errorMessage}`);
+
+          // Circuit breaker por sala: muchos errores consecutivos sugieren
+          // que la sala entera está rota (ej. PDFs 404 sistemáticos).
+          if (consecutiveErrors >= CONSECUTIVE_ERROR_LIMIT) {
+            console.log(`  [abort sala] ${consecutiveErrors} errores consecutivos — abortando ${sala}`);
+            abortedBySala = true;
+            break;
+          }
         }
 
         await sleep(DELAY_BETWEEN_REQUESTS_MS);
@@ -256,14 +397,30 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
       ultima_corrida_descargados: downloaded,
       ultima_corrida_ya_existian: alreadyExists,
       ultima_corrida_errores: errors,
-      ultima_corrida_no_pdf: nonPdfSkipped,
-      ultima_corrida_early_stop: earlyStop
+      ultima_corrida_unsupported: unsupportedSkipped,
+      ultima_corrida_dup_in_run: dupInRun,
+      ultima_corrida_early_stop: earlyStop,
+      ultima_corrida_aborted_by_sala: abortedBySala
     });
 
-    const nonPdfSuffix = nonPdfSkipped > 0 ? ` · ${nonPdfSkipped} no-PDF` : '';
-    const earlyStopSuffix = earlyStop ? ' · early-stop' : '';
-    console.log(`\n  ═══ ${sala}: ${downloaded} descargados · ${alreadyExists} ya existían · ${errors} errores${nonPdfSuffix}${earlyStopSuffix} ═══`);
-    return { sala, downloaded, alreadyExists, errors, nonPdfSkipped, earlyStop };
+    const suffixes = [];
+    if (unsupportedSkipped > 0) suffixes.push(`${unsupportedSkipped} no-sop`);
+    if (dupInRun > 0)           suffixes.push(`${dupInRun} dup-API`);
+    if (earlyStop)              suffixes.push('early-stop');
+    if (abortedBySala)          suffixes.push('ABORT-sala');
+    const suffix = suffixes.length ? ' · ' + suffixes.join(' · ') : '';
+
+    console.log(`\n  ═══ ${sala}: ${downloaded} descargados · ${alreadyExists} ya existían · ${errors} errores${suffix} ═══`);
+    return {
+      sala,
+      downloaded,
+      alreadyExists,
+      errors,
+      unsupportedSkipped,
+      dupInRun,
+      earlyStop,
+      abortedBySala
+    };
   } finally {
     releaseLock(name);
   }
@@ -319,11 +476,12 @@ export async function run({
   }
 
   const totals = summaries.reduce((acc, s) => ({
-    downloaded:    acc.downloaded    + (s.downloaded    || 0),
-    alreadyExists: acc.alreadyExists + (s.alreadyExists || 0),
-    errors:        acc.errors        + (s.errors        || 0),
-    nonPdfSkipped: acc.nonPdfSkipped + (s.nonPdfSkipped || 0)
-  }), { downloaded: 0, alreadyExists: 0, errors: 0, nonPdfSkipped: 0 });
+    downloaded:         acc.downloaded         + (s.downloaded         || 0),
+    alreadyExists:      acc.alreadyExists      + (s.alreadyExists      || 0),
+    errors:             acc.errors             + (s.errors             || 0),
+    unsupportedSkipped: acc.unsupportedSkipped + (s.unsupportedSkipped || 0),
+    dupInRun:           acc.dupInRun           + (s.dupInRun           || 0)
+  }), { downloaded: 0, alreadyExists: 0, errors: 0, unsupportedSkipped: 0, dupInRun: 0 });
 
   return { summaries, totals, elapsedMs: Date.now() - startTime };
 }
@@ -342,22 +500,29 @@ export function printSummary({ summaries, totals, elapsedMs }) {
     if (s.skipped) {
       console.log(`  ${s.sala.padEnd(10)}  SALTADA (${s.reason})`);
     } else {
-      const nonPdf = s.nonPdfSkipped > 0 ? `  no-PDF: ${String(s.nonPdfSkipped).padStart(2)}` : '';
+      const flags = [];
+      if (s.unsupportedSkipped > 0) flags.push(`no-sop:${s.unsupportedSkipped}`);
+      if (s.dupInRun > 0)           flags.push(`dup:${s.dupInRun}`);
+      if (s.earlyStop)              flags.push('early-stop');
+      if (s.abortedBySala)          flags.push('ABORT');
+      const flagStr = flags.length ? '  ' + flags.join(' ') : '';
       console.log(
         `  ${s.sala.padEnd(10)}  descargados: ${String(s.downloaded).padStart(4)}  ` +
         `ya existían: ${String(s.alreadyExists).padStart(4)}  ` +
         `errores: ${String(s.errors).padStart(3)}` +
-        nonPdf +
-        (s.earlyStop ? '  [early-stop]' : '')
+        flagStr
       );
     }
   }
   console.log('  ─────────────────────────────────────────────────────────────');
-  const nonPdfTotal = totals.nonPdfSkipped > 0 ? `  no-PDF: ${String(totals.nonPdfSkipped).padStart(2)}` : '';
+  const totalFlags = [];
+  if (totals.unsupportedSkipped > 0) totalFlags.push(`no-sop:${totals.unsupportedSkipped}`);
+  if (totals.dupInRun > 0)           totalFlags.push(`dup:${totals.dupInRun}`);
+  const totalFlagStr = totalFlags.length ? '  ' + totalFlags.join(' ') : '';
   console.log(`  TOTAL       descargados: ${String(totals.downloaded).padStart(4)}  ` +
               `ya existían: ${String(totals.alreadyExists).padStart(4)}  ` +
               `errores: ${String(totals.errors).padStart(3)}` +
-              nonPdfTotal);
+              totalFlagStr);
   console.log(`  Tiempo: ${elapsedMin} min`);
 }
 

@@ -82,24 +82,29 @@ export function relativePath(organo, año, filename) {
 }
 
 /**
- * Construye un Set con los nombres de archivo (basename) de todos los PDFs
- * presentes en cualquier nivel bajo `uploads/<organo>/`.
+ * Construye un Set con los nombres "base" (filename SIN extensión) de todas
+ * las sentencias presentes en cualquier nivel bajo `uploads/<organo>/`.
  *
- * Útil para scrapers que necesitan dedup tolerante a estructuras de carpeta
- * heterogéneas: el corpus puede tener archivos en paths anidados legacy
- * (ej. <organo>/Sala Civil/2017/*.pdf) mientras que el scraper baja archivos
- * nuevos a la ruta plana (<organo>/<año>/*.pdf). Con este índice, el scraper
- * reconoce los existentes sin importar dónde estén.
+ * Se incluyen archivos .pdf, .docx y .doc, con el basename normalizado a
+ * minúsculas para comparación case-insensitive. Eso permite al scraper tratar
+ * una sentencia como "ya existente" sin importar en qué formato esté guardada
+ * ni dónde en el árbol viva. Ejemplo:
  *
- * El sidecar de macOS (._*.pdf) se ignora automáticamente, igual que en
- * scripts/ingest-bulk.js.
+ *   uploads/<organo>/2017/SC5208-2017.pdf        → "sc5208-2017"
+ *   uploads/<organo>/.../TodosLosAños/X.docx     → "x"
+ *   uploads/<organo>/2020/Y.DOC                  → "y"
  *
- * @returns {Set<string>} nombres de archivo (no rutas) ya presentes
+ * Sidecars AppleDouble de macOS (._*) se ignoran, consistente con
+ * scripts/ingest-bulk.js y scripts/ocr-saltados.js.
+ *
+ * @returns {Set<string>} basenames (lowercase, sin extensión) ya presentes
  */
 export function buildBasenameIndex(organo) {
   const base = path.join(UPLOADS_DIR, safeName(organo));
   const names = new Set();
   if (!fs.existsSync(base)) return names;
+
+  const SUPPORTED_EXT = /\.(pdf|docx|doc)$/i;
 
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -107,8 +112,8 @@ export function buildBasenameIndex(organo) {
       if (entry.name.startsWith('._')) continue;
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) walk(full);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) {
-        names.add(entry.name);
+      else if (entry.isFile() && SUPPORTED_EXT.test(entry.name)) {
+        names.add(entry.name.replace(SUPPORTED_EXT, '').toLowerCase());
       }
     }
   }
