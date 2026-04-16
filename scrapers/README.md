@@ -133,5 +133,62 @@ try {
 
 ## Scrapers disponibles
 
-_Ninguno todavía. El primero (Corte Suprema de Justicia) viene en el próximo
-commit._
+### Corte Suprema de Justicia (`corte-suprema.js`)
+
+Consume la API GraphQL pública de consulta de providencias. Soporta las 4
+salas: **Civil, Laboral, Penal, Tutelas**. Clasifica automáticamente por año
+usando el metadata del API.
+
+Dos modos de uso:
+
+```bash
+# Incremental (default, para cron): las 4 salas, early-stop al primer existente
+node scrapers/corte-suprema.js
+
+# Ad-hoc (búsqueda dirigida): filtros específicos, sin early-stop
+node scrapers/corte-suprema.js --ad-hoc --sala Civil --query "laudo" --ano 2025 --max 78
+```
+
+Flags:
+- `--sala` — Civil | Laboral | Penal | Tutelas (default: las 4)
+- `--query` — término de búsqueda (default: "a", comodín)
+- `--ano` — filtro de año (default: todos)
+- `--magistrado` — filtro de magistrado (default: todos)
+- `--max` — tope de docs por sala (default: 10000)
+- `--ad-hoc` — desactiva early-stop (default: activo)
+
+## Orquestador + pipeline (`index.js`, `pipeline.js`)
+
+Para correr todos los scrapers y automáticamente procesar sus descargas:
+
+```bash
+node scrapers/index.js
+```
+
+Esto:
+1. Corre cada scraper en orden (modo incremental)
+2. Si alguno descargó ≥1 PDF nuevo → dispara el pipeline:
+   - `scripts/ocr-saltados.js` (OCR si hace falta)
+   - `scripts/ingest-bulk.js` (indexa a Qdrant)
+3. Si no hubo descargas, el pipeline no se ejecuta (son idempotentes pero
+   evitamos gasto innecesario de CPU)
+
+Para programar el cron diario:
+
+```bash
+pm2 start scrapers/index.js \
+  --name scraper-diario \
+  --cron "0 3 * * *" \
+  --no-autorestart
+pm2 save
+```
+
+Eso corre el orquestador completo cada día a las 3 AM hora del VPS. Cuando
+despiertas, cualquier sentencia nueva ya está descargada, OCR'izada, indexada
+y disponible vía MCP.
+
+Exit codes del orquestador:
+- `0` — todo ok
+- `1` — algún scraper tuvo errores pero otros funcionaron
+- `2` — todos los scrapers fallaron
+- `3` — scrapers ok pero el pipeline downstream falló

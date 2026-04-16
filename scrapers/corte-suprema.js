@@ -39,6 +39,7 @@
 
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 import { fetchJSON, fetchBuffer, getBudgetStatus } from './lib/http.js';
 import { saveAtomic, cleanupTmp, safeName, buildBasenameIndex } from './lib/storage.js';
@@ -268,29 +269,36 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental }) {
   }
 }
 
-// ─── Entry point ──────────────────────────────────────────────────────────────
+// ─── API programática ─────────────────────────────────────────────────────────
 
-async function main() {
-  const { values } = parseArgs({
-    options: {
-      sala:       { type: 'string' },
-      query:      { type: 'string', default: 'a' },
-      ano:        { type: 'string', default: '' },
-      magistrado: { type: 'string', default: '' },
-      max:        { type: 'string', default: '10000' },
-      'ad-hoc':   { type: 'boolean', default: false }
-    }
-  });
-
-  const max         = Number(values.max);
-  const incremental = !values['ad-hoc'];
-  const salas       = values.sala ? [values.sala] : SALAS_DEFAULT;
-
+/**
+ * Corre el scraper de CSJ sobre una o más salas.
+ *
+ * Esta función es la API programática del módulo — el orquestador
+ * (scrapers/index.js) la invoca directamente. Para uso CLI, ver runCLI abajo.
+ *
+ * @param {object} options
+ * @param {string[]} [options.salas]       — salas a procesar. Default: las 4
+ * @param {string}   [options.query='a']   — query del API
+ * @param {string}   [options.ano='']      — filtro de año ("" = todos)
+ * @param {string}   [options.magistrado=''] — filtro de magistrado
+ * @param {number}   [options.max=10000]   — tope de docs a considerar por sala
+ * @param {boolean}  [options.incremental=true] — early-stop al primer ya-existente
+ *
+ * @returns {Promise<{summaries, totals, elapsedMs}>} resultados agregados
+ */
+export async function run({
+  salas = SALAS_DEFAULT,
+  query = 'a',
+  ano = '',
+  magistrado = '',
+  max = 10_000,
+  incremental = true
+} = {}) {
   // Validación temprana
   for (const s of salas) {
     if (!SALAS_DEFAULT.includes(s)) {
-      console.error(`ERROR: Sala "${s}" no válida. Opciones: ${SALAS_DEFAULT.join(', ')}`);
-      process.exit(1);
+      throw new Error(`Sala "${s}" no válida. Opciones: ${SALAS_DEFAULT.join(', ')}`);
     }
   }
 
@@ -306,18 +314,10 @@ async function main() {
 
   const summaries = [];
   for (const sala of salas) {
-    const summary = await scrapeSala({
-      sala,
-      query: values.query,
-      ano:   values.ano,
-      magistrado: values.magistrado,
-      max,
-      incremental
-    });
+    const summary = await scrapeSala({ sala, query, ano, magistrado, max, incremental });
     summaries.push(summary);
   }
 
-  // Resumen final
   const totals = summaries.reduce((acc, s) => ({
     downloaded:    acc.downloaded    + (s.downloaded    || 0),
     alreadyExists: acc.alreadyExists + (s.alreadyExists || 0),
@@ -325,10 +325,18 @@ async function main() {
     nonPdfSkipped: acc.nonPdfSkipped + (s.nonPdfSkipped || 0)
   }), { downloaded: 0, alreadyExists: 0, errors: 0, nonPdfSkipped: 0 });
 
-  const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
+  return { summaries, totals, elapsedMs: Date.now() - startTime };
+}
+
+/**
+ * Imprime el resumen final a stdout. Se usa tanto desde el CLI como desde el
+ * orquestador cuando quiere el resumen por-scraper.
+ */
+export function printSummary({ summaries, totals, elapsedMs }) {
+  const elapsedMin = (elapsedMs / 1000 / 60).toFixed(1);
 
   console.log('\n═══════════════════════════════════════════════════════════════');
-  console.log('  RESUMEN FINAL');
+  console.log('  RESUMEN FINAL — Corte Suprema de Justicia');
   console.log('═══════════════════════════════════════════════════════════════');
   for (const s of summaries) {
     if (s.skipped) {
@@ -350,20 +358,51 @@ async function main() {
               `ya existían: ${String(totals.alreadyExists).padStart(4)}  ` +
               `errores: ${String(totals.errors).padStart(3)}` +
               nonPdfTotal);
-  console.log(`  Tiempo: ${elapsed} min`);
+  console.log(`  Tiempo: ${elapsedMin} min`);
+}
+
+// ─── Entry point CLI ──────────────────────────────────────────────────────────
+
+async function runCLI() {
+  const { values } = parseArgs({
+    options: {
+      sala:       { type: 'string' },
+      query:      { type: 'string', default: 'a' },
+      ano:        { type: 'string', default: '' },
+      magistrado: { type: 'string', default: '' },
+      max:        { type: 'string', default: '10000' },
+      'ad-hoc':   { type: 'boolean', default: false }
+    }
+  });
+
+  const result = await run({
+    salas:       values.sala ? [values.sala] : SALAS_DEFAULT,
+    query:       values.query,
+    ano:         values.ano,
+    magistrado:  values.magistrado,
+    max:         Number(values.max),
+    incremental: !values['ad-hoc']
+  });
+
+  printSummary(result);
 
   // Exit code según resultado:
   //   0 — todo ok (incluso si no se descargó nada nuevo)
   //   1 — errores de red o API, pero algo se descargó
   //   2 — fallo total (ningún scraper pudo correr)
+  const { summaries, totals } = result;
   const allSkipped = summaries.every(s => s.skipped);
   if (allSkipped) process.exit(2);
   if (totals.errors > 0 && totals.downloaded === 0) process.exit(1);
   process.exit(0);
 }
 
-main().catch(e => {
-  console.error('\nERROR FATAL:', e.message);
-  console.error(e.stack);
-  process.exit(1);
-});
+// Solo corre el CLI si este archivo se invoca directamente (no cuando se
+// importa como módulo desde el orquestador).
+if (import.meta.url === pathToFileURL(process.argv[1]).href) {
+  runCLI().catch(e => {
+    console.error('\nERROR FATAL:', e.message);
+    console.error(e.stack);
+    process.exit(1);
+  });
+}
