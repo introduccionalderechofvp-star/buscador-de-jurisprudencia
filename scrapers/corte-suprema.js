@@ -383,6 +383,7 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
   // dispara early-stop (los duplicados de la API no significan que "ya
   // alcanzamos el corpus anterior").
   const downloadedThisRun = new Set();
+  const failedThisRun = new Set();
 
   const prevState = readState(name) || {
     sala,
@@ -437,7 +438,13 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
 
         // 1. ¿Ya existía antes de esta corrida? → dispara early-stop (incremental)
         if (existingBeforeRun.has(groupKey)) {
-          alreadyExists++;
+          if (!downloadedThisRun.has(groupKey)) {
+            alreadyExists++;
+            downloadedThisRun.add(groupKey);
+          } else {
+            dupInRun++;
+            continue;
+          }
           if (incremental) {
             console.log(`    [existe] ${group.base} → early-stop activado`);
             earlyStop = true;
@@ -447,8 +454,8 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
           continue;
         }
 
-        // 2. ¿Ya lo descargamos en ESTA misma corrida? (API a veces duplica) → skip silencioso
-        if (downloadedThisRun.has(groupKey)) {
+        // 2. ¿Ya lo descargamos o falló en ESTA misma corrida? → skip silencioso
+        if (downloadedThisRun.has(groupKey) || failedThisRun.has(groupKey)) {
           dupInRun++;
           continue;
         }
@@ -473,6 +480,7 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
         } else {
           errors++;
           consecutiveErrors++;
+          failedThisRun.add(groupKey);
           console.log(`    [err]    ${group.base}: ${result.errorMessage}`);
 
           // Circuit breaker por sala: muchos errores consecutivos sugieren
