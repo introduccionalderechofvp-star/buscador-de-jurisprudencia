@@ -483,6 +483,12 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
           failedThisRun.add(groupKey);
           console.log(`    [err]    ${group.base}: ${result.errorMessage}`);
 
+          if (result.errorMessage?.includes('Presupuesto diario agotado')) {
+            console.log(`  [budget] Presupuesto agotado — deteniendo sala ${sala}`);
+            abortedBySala = true;
+            break;
+          }
+
           // Circuit breaker por sala: muchos errores consecutivos sugieren
           // que la sala entera está rota (ej. PDFs 404 sistemáticos).
           // Deshabilitado si noAbort=true (modo diagnóstico).
@@ -650,7 +656,7 @@ async function runCLI() {
       query:       { type: 'string', default: 'a' },
       ano:         { type: 'string', default: '' },
       magistrado:  { type: 'string', default: '' },
-      max:         { type: 'string', default: '10000' },
+      max:         { type: 'string', default: 'Infinity' },
       'ad-hoc':    { type: 'boolean', default: false },
       'no-abort':  { type: 'boolean', default: false }
     }
