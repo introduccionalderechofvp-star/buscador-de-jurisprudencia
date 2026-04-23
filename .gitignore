@@ -5,5 +5,7 @@ node_modules/
 scrapers/state/
 scrapers/errors/
 
-# Runtime state del ingest-bulk (optimización mtime)
+# Runtime state del ingest (optimización mtime)
 .ingest-state.json
+.ingest-state-doctrina.json
+.doctrina-clasificaciones.json

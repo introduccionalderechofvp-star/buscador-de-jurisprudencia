@@ -66,10 +66,12 @@ const TOOLS = [
   {
     name: 'buscar_sentencias',
     description:
-      'Busca sentencias de jurisprudencia colombiana usando búsqueda híbrida ' +
+      'Busca en la base de conocimiento jurídico usando búsqueda híbrida ' +
       '(vectorial semántica + léxica con keywords) sobre la colección indexada en Qdrant. ' +
-      'Devuelve fragmentos relevantes de los documentos junto con metadatos (filename, ' +
-      'organo, file_path) que se pueden usar después para obtener el texto completo. ' +
+      'Incluye tanto JURISPRUDENCIA (sentencias de cortes colombianas) como DOCTRINA ' +
+      '(libros de texto jurídico). Devuelve fragmentos relevantes junto con metadatos ' +
+      '(filename, organo, file_path, y para doctrina: autor, titulo_libro, materia). ' +
+      'Usa el parámetro organo para filtrar por fuente: omítelo para buscar en todo. ' +
       'No usa rerank con Claude (modo económico): el costo por llamada es ~$0.0001. ' +
       'Si los resultados no son suficientemente relevantes, considera reformular la consulta ' +
       'con sinónimos jurídicos o términos técnicos equivalentes y volver a buscar.',
@@ -87,8 +89,9 @@ const TOOLS = [
         organo: {
           type: 'string',
           description:
-            'Opcional. Filtra por órgano judicial. Debe coincidir EXACTAMENTE con el ' +
+            'Opcional. Filtra por fuente. Debe coincidir EXACTAMENTE con el ' +
             'nombre usado en la indexación. Valores conocidos actualmente:\n' +
+            '  Jurisprudencia:\n' +
             '  - "Sala Civil - Corte Suprema de Justicia"\n' +
             '  - "Sala Laboral - Corte Suprema de Justicia"\n' +
             '  - "Sala Penal - Corte Suprema de Justicia"\n' +
@@ -96,8 +99,12 @@ const TOOLS = [
             '  - "Sala Civil - Tribunal Superior de Medellín"\n' +
             '  - "Sala Laboral - Tribunal Superior de Medellín"\n' +
             '  - "Sala Penal - Tribunal Superior de Medellín"\n' +
-            'Omitir para buscar en todos los órganos. Si no sabes qué valor usar, ' +
-            'primero busca sin filtro y revisa el campo "organo" en los resultados.',
+            '  Doctrina:\n' +
+            '  - "Doctrina" (libros de texto jurídico — incluye campos adicionales: ' +
+            'materia, jurisdiccion, autor, titulo_libro)\n' +
+            'Omitir para buscar en TODAS las fuentes (jurisprudencia + doctrina). ' +
+            'Si no sabes qué valor usar, primero busca sin filtro y revisa el campo ' +
+            '"organo" en los resultados.',
         },
         limit: {
           type: 'number',

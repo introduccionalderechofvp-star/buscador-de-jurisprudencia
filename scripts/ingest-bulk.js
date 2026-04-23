@@ -149,7 +149,7 @@ async function main() {
     : UPLOADS_DIR;
 
   const organos = fs.readdirSync(targetDir, { withFileTypes: true })
-    .filter(e => e.isDirectory())
+    .filter(e => e.isDirectory() && e.name !== 'Doctrina')
     .map(e => e.name);
 
   if (!organos.length) {
