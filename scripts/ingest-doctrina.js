@@ -40,7 +40,8 @@ const QDRANT_KEY     = process.env.QDRANT_API_KEY     || undefined;
 const CHUNK_SIZE    = 500;
 const CHUNK_OVERLAP = 100;
 const EMB_BATCH     = 20;
-const DELAY_MS      = 150;
+const DELAY_MS      = Number(process.env.INGEST_DELAY_MS || 150);
+const FILE_DELAY_MS = Number(process.env.INGEST_FILE_DELAY_MS || 500);
 
 const FORCE_FULL    = process.argv.includes('--force')    || process.env.INGEST_FORCE === 'true';
 const SKIP_OCR      = process.argv.includes('--skip-ocr');
@@ -349,7 +350,7 @@ async function main() {
         `${fmt(chunks.length)} frag  [${clasif.materia} · ${clasif.jurisdiccion}]`
       );
 
-      await sleep(100);
+      await sleep(FILE_DELAY_MS);
     } catch (e) {
       errors++;
       console.error(`${prefix} ${shortName}`.padEnd(60) + `ERROR: ${e.message.slice(0, 80)}`);

@@ -40,7 +40,8 @@ const QDRANT_KEY     = process.env.QDRANT_API_KEY     || undefined;
 const CHUNK_SIZE  = 500;
 const CHUNK_OVERLAP = 100;
 const EMB_BATCH   = 20;   // chunks por llamada a OpenAI
-const DELAY_MS    = 150;  // pausa entre lotes (evitar rate-limit)
+const DELAY_MS    = Number(process.env.INGEST_DELAY_MS || 150);
+const FILE_DELAY_MS = Number(process.env.INGEST_FILE_DELAY_MS || 500);
 
 // ─── Estado persistente (optimización mtime) ──────────────────────────────────
 
@@ -280,7 +281,7 @@ async function main() {
         totalErrors++;
       }
 
-      await sleep(100);
+      await sleep(FILE_DELAY_MS);
     }
   }
 
