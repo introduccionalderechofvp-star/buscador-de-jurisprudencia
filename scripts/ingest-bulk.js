@@ -15,9 +15,12 @@
  *   node scripts/ingest-bulk.js --force      # procesa TODO, ignora state
  *
  * Opciones de entorno (en .env):
- *   BULK_ORGANO   — fuerza un órgano específico ignorando el nombre de carpeta
- *   BULK_PATH     — procesa solo esta subcarpeta dentro de uploads/
- *   INGEST_FORCE  — equivalente a --force (true/false)
+ *   BULK_ORGANO         — fuerza un órgano específico ignorando el nombre de carpeta
+ *   BULK_PATH           — procesa solo esta subcarpeta dentro de uploads/
+ *   INGEST_FORCE        — equivalente a --force (true/false)
+ *   INGEST_CONCURRENCY  — archivos en paralelo (default 1 = secuencial)
+ *   INGEST_DELAY_MS     — delay entre sub-lotes de embeddings (default 150)
+ *   INGEST_FILE_DELAY_MS — delay entre archivos por worker (default 500)
  */
 
 import 'dotenv/config';
@@ -42,6 +45,7 @@ const CHUNK_OVERLAP = 100;
 const EMB_BATCH   = 20;   // chunks por llamada a OpenAI
 const DELAY_MS    = Number(process.env.INGEST_DELAY_MS || 150);
 const FILE_DELAY_MS = Number(process.env.INGEST_FILE_DELAY_MS || 500);
+const CONCURRENCY = Math.max(1, Number(process.env.INGEST_CONCURRENCY || 1));
 
 // ─── Estado persistente (optimización mtime) ──────────────────────────────────
 
@@ -171,11 +175,15 @@ async function main() {
   } else {
     console.log(`Modo:    primera corrida (sin state previo, procesa todo y guarda state al terminar)`);
   }
+  if (CONCURRENCY > 1) {
+    console.log(`Concurrencia: ${CONCURRENCY} archivos en paralelo`);
+  }
   console.log('');
 
   const startTime = Date.now();
   let totalFiles = 0, totalProcessed = 0, totalSkipped = 0, totalErrors = 0, totalChunks = 0;
   let totalMtimeSkipped = 0;
+  let globalIndex = 0;
 
   for (const organo of organos) {
     const organoDir = path.join(targetDir, organo);
@@ -203,91 +211,104 @@ async function main() {
 
     if (pdfs.length === 0) continue;
 
+    // Pre-filtrar: aplicar --skip=N (global cross-órgano) antes de armar la cola
+    const work = [];
     for (let i = 0; i < pdfs.length; i++) {
-      if (totalSkipped + totalProcessed + totalErrors < SKIP_N) {
+      globalIndex++;
+      if (globalIndex <= SKIP_N) {
         totalSkipped++;
         continue;
       }
-      const filePath  = pdfs[i];
-      const filename  = path.basename(filePath);
-      const fileLabel = `[${i+1}/${pdfs.length}]`;
-      const shortName = filename.length > 45 ? filename.slice(0,42) + '...' : filename;
-
-      process.stdout.write(`${fileLabel} ${shortName.padEnd(47)} `);
-
-      // Parse PDF
-      let text;
-      try {
-        const buffer = fs.readFileSync(filePath);
-        const parsed = await pdf(buffer);
-        text = parsed.text?.trim() || '';
-      } catch (e) {
-        console.log(`ERROR lectura: ${e.message.slice(0,60)}`);
-        totalErrors++;
-        continue;
-      }
-
-      if (text.length < 50) {
-        console.log('SALTADO (sin texto)');
-        totalSkipped++;
-        continue;
-      }
-
-      const documentId = hash(`${filename}:${text.slice(0, 10000)}`);
-
-      if (await isIndexed(qdrant, documentId)) {
-        console.log('ya indexado');
-        totalSkipped++;
-        continue;
-      }
-
-      const chunks = chunkText(text);
-
-      // Embeddings en sub-lotes
-      const embeddings = [];
-      try {
-        for (let j = 0; j < chunks.length; j += EMB_BATCH) {
-          const batch = chunks.slice(j, j + EMB_BATCH);
-          const emb = await openai.embeddings.create({
-            model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
-          });
-          embeddings.push(...emb.data.map(d => d.embedding));
-          if (j + EMB_BATCH < chunks.length) await sleep(DELAY_MS);
-        }
-      } catch (e) {
-        console.log(`ERROR OpenAI: ${e.message.slice(0,60)}`);
-        totalErrors++;
-        continue;
-      }
-
-      // Construir puntos
-      const filePath_rel = path.relative(UPLOADS_DIR, filePath);
-      const points = chunks.map((chunk, idx) => ({
-        id: hashToUUID(`${documentId}:${idx}`),
-        vector: embeddings[idx],
-        payload: {
-          document_id : documentId,
-          filename,
-          file_path   : filePath_rel,
-          organo,
-          chunk_index : idx,
-          text        : chunk.slice(0, 1200)
-        }
-      }));
-
-      // Upsert a Qdrant
-      try {
-        await qdrant.upsert(COLLECTION, { wait: true, points });
-        totalChunks    += points.length;
-        totalProcessed++;
-        console.log(`${fmt(points.length)} fragmentos`);
-      } catch (e) {
-        console.log(`ERROR Qdrant: ${e.message.slice(0,60)}`);
-        totalErrors++;
-      }
-
-      await sleep(FILE_DELAY_MS);
+      work.push({ filePath: pdfs[i], label: `[${i+1}/${pdfs.length}]` });
     }
+
+    if (work.length === 0) continue;
+
+    // Worker pool: con CONCURRENCY=1 es idéntico al loop secuencial original.
+    // Con N>1, N workers consumen la cola en paralelo. Cada upsert se loggea
+    // en una sola línea para que la salida concurrente sea legible.
+    let cursor = 0;
+    const workerFn = async () => {
+      while (true) {
+        const idx = cursor++;
+        if (idx >= work.length) return;
+        const { filePath, label } = work[idx];
+        const filename  = path.basename(filePath);
+        const shortName = filename.length > 45 ? filename.slice(0,42) + '...' : filename;
+        const prefix    = `${label} ${shortName.padEnd(47)} `;
+
+        let text;
+        try {
+          const buffer = fs.readFileSync(filePath);
+          const parsed = await pdf(buffer);
+          text = parsed.text?.trim() || '';
+        } catch (e) {
+          console.log(prefix + `ERROR lectura: ${e.message.slice(0,60)}`);
+          totalErrors++;
+          continue;
+        }
+
+        if (text.length < 50) {
+          console.log(prefix + 'SALTADO (sin texto)');
+          totalSkipped++;
+          continue;
+        }
+
+        const documentId = hash(`${filename}:${text.slice(0, 10000)}`);
+
+        if (await isIndexed(qdrant, documentId)) {
+          console.log(prefix + 'ya indexado');
+          totalSkipped++;
+          continue;
+        }
+
+        const chunks = chunkText(text);
+
+        const embeddings = [];
+        try {
+          for (let j = 0; j < chunks.length; j += EMB_BATCH) {
+            const batch = chunks.slice(j, j + EMB_BATCH);
+            const emb = await openai.embeddings.create({
+              model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
+            });
+            embeddings.push(...emb.data.map(d => d.embedding));
+            if (j + EMB_BATCH < chunks.length) await sleep(DELAY_MS);
+          }
+        } catch (e) {
+          console.log(prefix + `ERROR OpenAI: ${e.message.slice(0,60)}`);
+          totalErrors++;
+          continue;
+        }
+
+        const filePath_rel = path.relative(UPLOADS_DIR, filePath);
+        const points = chunks.map((chunk, idx) => ({
+          id: hashToUUID(`${documentId}:${idx}`),
+          vector: embeddings[idx],
+          payload: {
+            document_id : documentId,
+            filename,
+            file_path   : filePath_rel,
+            organo,
+            chunk_index : idx,
+            text        : chunk.slice(0, 1200)
+          }
+        }));
+
+        try {
+          await qdrant.upsert(COLLECTION, { wait: true, points });
+          totalChunks    += points.length;
+          totalProcessed++;
+          console.log(prefix + `${fmt(points.length)} fragmentos`);
+        } catch (e) {
+          console.log(prefix + `ERROR Qdrant: ${e.message.slice(0,60)}`);
+          totalErrors++;
+        }
+
+        await sleep(FILE_DELAY_MS);
+      }
+    };
+
+    await Promise.all(Array.from({ length: CONCURRENCY }, () => workerFn()));
   }
 
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
