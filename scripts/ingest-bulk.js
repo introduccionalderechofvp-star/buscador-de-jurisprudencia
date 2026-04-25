@@ -48,6 +48,7 @@ const FILE_DELAY_MS = Number(process.env.INGEST_FILE_DELAY_MS || 500);
 const STATE_FILE  = path.join(process.cwd(), '.ingest-state.json');
 const FORCE_FULL  = process.argv.includes('--force')
                  || process.env.INGEST_FORCE === 'true';
+const SKIP_N      = Number(process.argv.find(a => a.startsWith('--skip='))?.split('=')[1] || 0);
 
 function loadState() {
   if (FORCE_FULL) return { last_completed_at: 0 };
@@ -203,6 +204,10 @@ async function main() {
     if (pdfs.length === 0) continue;
 
     for (let i = 0; i < pdfs.length; i++) {
+      if (totalSkipped + totalProcessed + totalErrors < SKIP_N) {
+        totalSkipped++;
+        continue;
+      }
       const filePath  = pdfs[i];
       const filename  = path.basename(filePath);
       const fileLabel = `[${i+1}/${pdfs.length}]`;
