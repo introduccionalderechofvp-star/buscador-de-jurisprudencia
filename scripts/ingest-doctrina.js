@@ -365,20 +365,50 @@ async function main() {
       totalChunks += chunks.length;
 
       // ── Embeddings ──
+      // Estrategia: intenta el batch normal. Si OpenAI rechaza (400) un input
+      // por exceder 8192 tokens (contenido OCR-eado con ratio extremo
+      // tokens/char), cae a procesar el batch chunk por chunk y skippea
+      // solo los problemáticos. Así un libro no pierde toda su indexación
+      // por un solo chunk patológico.
       const embeddings = [];
+      const droppedIndices = [];
       for (let j = 0; j < chunks.length; j += EMB_BATCH) {
         const batch = chunks.slice(j, j + EMB_BATCH);
-        const emb = await withRetry(() => openai.embeddings.create({
-          model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
-        }));
-        embeddings.push(...emb.data.map(d => d.embedding));
+        try {
+          const emb = await withRetry(() => openai.embeddings.create({
+            model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
+          }));
+          embeddings.push(...emb.data.map(d => d.embedding));
+        } catch (eBatch) {
+          // Fallback: uno por uno, marcar nulls los que fallen
+          for (let k = 0; k < batch.length; k++) {
+            try {
+              const emb1 = await withRetry(() => openai.embeddings.create({
+                model: EMBEDDING_MODEL, input: [batch[k]], dimensions: EMBEDDING_DIM
+              }));
+              embeddings.push(emb1.data[0].embedding);
+            } catch (eOne) {
+              embeddings.push(null);
+              droppedIndices.push(j + k);
+            }
+          }
+        }
         if (j + EMB_BATCH < chunks.length) await sleep(DELAY_MS);
       }
 
+      if (droppedIndices.length === chunks.length) {
+        // Todos los chunks fallaron individualmente → libro irrecuperable
+        throw new Error(`todos los ${chunks.length} chunks rechazados por OpenAI`);
+      }
+
       // ── Puntos para Qdrant ──
+      // Filtrar chunks sin embedding (los que fallaron individualmente)
       const points = chunks.map((chunk, idx) => ({
-        id: hashToUUID(`${documentId}:${idx}`),
-        vector: embeddings[idx],
+        idx, chunk,
+        embedding: embeddings[idx]
+      })).filter(p => p.embedding !== null).map(p => ({
+        id: hashToUUID(`${documentId}:${p.idx}`),
+        vector: p.embedding,
         payload: {
           document_id:   documentId,
           filename,
@@ -389,17 +419,18 @@ async function main() {
           jurisdiccion:  clasif.jurisdiccion  || 'Sin clasificar',
           autor:         clasif.autor         || 'Desconocido',
           titulo_libro:  clasif.titulo        || filename.replace(/\.pdf$/i, ''),
-          chunk_index:   idx,
-          text:          chunk.slice(0, 1200)
+          chunk_index:   p.idx,
+          text:          p.chunk.slice(0, 1200)
         }
       }));
 
       // ── Upsert ──
       await withRetry(() => qdrant.upsert(COLLECTION, { wait: true, points }));
       processed++;
+      const droppedNote = droppedIndices.length > 0 ? ` (${droppedIndices.length} chunks rechazados)` : '';
       console.log(
         `${prefix} ${shortName}`.padEnd(60) +
-        `${fmt(chunks.length)} frag  [${clasif.materia} · ${clasif.jurisdiccion}]`
+        `${fmt(points.length)} frag  [${clasif.materia} · ${clasif.jurisdiccion}]${droppedNote}`
       );
 
       await sleep(FILE_DELAY_MS);
