@@ -72,7 +72,33 @@ function chunkText(text) {
     if (end >= words.length) break;
     start += CHUNK_SIZE - CHUNK_OVERLAP;
   }
-  return chunks;
+  // Cap por caracteres: si el OCR mete bloques sin espacios, una "palabra"
+  // gigante puede hacer que un chunk supere los 8192 tokens de OpenAI.
+  // 6000 chars ≈ 1500-1800 tokens, queda con margen.
+  const MAX_CHUNK_CHARS = 6000;
+  const capped = [];
+  for (const c of chunks) {
+    if (c.length <= MAX_CHUNK_CHARS) capped.push(c);
+    else for (let i = 0; i < c.length; i += MAX_CHUNK_CHARS) capped.push(c.slice(i, i + MAX_CHUNK_CHARS));
+  }
+  return capped;
+}
+
+// Reintenta operaciones cuando el error es transitorio (fetch failed, ECONNRESET,
+// timeout, etc). NO reintenta errores 4xx legítimos como "Bad Request" o "input too long".
+async function withRetry(fn, maxAttempts = 3) {
+  let lastErr;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try { return await fn(); }
+    catch (e) {
+      lastErr = e;
+      const msg = String(e?.message || e);
+      const transient = /fetch failed|ECONNRESET|ETIMEDOUT|EAI_AGAIN|timeout|socket hang up|503|502|504/i.test(msg);
+      if (!transient || attempt === maxAttempts) throw e;
+      await new Promise(r => setTimeout(r, 2000 * Math.pow(2, attempt - 1)));
+    }
+  }
+  throw lastErr;
 }
 
 function findPDFs(dir) {
@@ -316,9 +342,9 @@ async function main() {
       const embeddings = [];
       for (let j = 0; j < chunks.length; j += EMB_BATCH) {
         const batch = chunks.slice(j, j + EMB_BATCH);
-        const emb = await openai.embeddings.create({
+        const emb = await withRetry(() => openai.embeddings.create({
           model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
-        });
+        }));
         embeddings.push(...emb.data.map(d => d.embedding));
         if (j + EMB_BATCH < chunks.length) await sleep(DELAY_MS);
       }
@@ -343,7 +369,7 @@ async function main() {
       }));
 
       // ── Upsert ──
-      await qdrant.upsert(COLLECTION, { wait: true, points });
+      await withRetry(() => qdrant.upsert(COLLECTION, { wait: true, points }));
       processed++;
       console.log(
         `${prefix} ${shortName}`.padEnd(60) +
