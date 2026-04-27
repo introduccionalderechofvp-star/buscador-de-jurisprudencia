@@ -13,6 +13,10 @@
  *   node scripts/ingest-doctrina.js --force       # reprocesar todo
  *   node scripts/ingest-doctrina.js --skip-ocr    # saltar paso de OCR
  *   node scripts/ingest-doctrina.js --classify-only  # solo clasificar, sin embeddings
+ *
+ * Recovery quirúrgico:
+ *   FILES_LIST=/tmp/lista.txt node scripts/ingest-doctrina.js
+ *   (donde lista.txt tiene un basename de PDF por línea — solo esos se procesan)
  */
 
 import 'dotenv/config';
@@ -269,6 +273,25 @@ async function main() {
       catch { return true; }
     });
     mtimeSkipped = allPdfs.length - pdfs.length;
+  }
+
+  // Filtro por lista de archivos específicos (recovery quirúrgico).
+  // FILES_LIST = ruta a un archivo de texto con un basename de PDF por línea.
+  // Si está set, ignora todo lo demás y solo procesa esos.
+  const FILES_LIST = process.env.FILES_LIST;
+  if (FILES_LIST) {
+    if (!fs.existsSync(FILES_LIST)) {
+      console.error(`ERROR: FILES_LIST apunta a un archivo que no existe: ${FILES_LIST}`);
+      process.exit(1);
+    }
+    const wanted = new Set(
+      fs.readFileSync(FILES_LIST, 'utf8')
+        .split('\n').map(s => s.trim()).filter(Boolean)
+    );
+    const before = pdfs.length;
+    pdfs = allPdfs.filter(p => wanted.has(path.basename(p)));
+    mtimeSkipped = 0; // FILES_LIST anula el mtime filter
+    console.log(`FILES_LIST: ${wanted.size} pedidos, ${pdfs.length} encontrados en disco`);
   }
 
   console.log(`PDFs encontrados : ${fmt(allPdfs.length)} total, ${fmt(pdfs.length)} a procesar`);
