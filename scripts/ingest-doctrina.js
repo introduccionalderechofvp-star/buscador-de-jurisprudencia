@@ -78,8 +78,11 @@ function chunkText(text) {
   }
   // Cap por caracteres: si el OCR mete bloques sin espacios, una "palabra"
   // gigante puede hacer que un chunk supere los 8192 tokens de OpenAI.
-  // 6000 chars ≈ 1500-1800 tokens, queda con margen.
-  const MAX_CHUNK_CHARS = 6000;
+  // Para texto OCR-eado en español, hemos visto que algunos chunks de 6000
+  // chars producen >8192 tokens (1.4 t/c) por contenido hostil al tokenizer
+  // (números seguidos, símbolos, fragmentos sin separación). Bajamos a 3000
+  // (~6000 tokens worst-case) que da margen seguro.
+  const MAX_CHUNK_CHARS = 3000;
   const capped = [];
   for (const c of chunks) {
     if (c.length <= MAX_CHUNK_CHARS) capped.push(c);
