@@ -82,6 +82,17 @@ function extractKeywords(query) {
     .slice(0, 5);
 }
 
+// Wrapper con timeout: si la promesa no resuelve en `ms`, rechaza con error
+// claro. Útil para degradar grácilmente cuando una API externa (Anthropic,
+// OpenAI) tarda demasiado y bloquearía la respuesta al cliente.
+function withTimeout(promise, ms, label = 'operation') {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`${label} timeout (${ms}ms)`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 // Crea el índice de texto en Qdrant si no existe (idempotente)
 async function ensureTextIndex() {
   try {
@@ -261,17 +272,25 @@ app.post('/api/search', async (req, res) => {
     // Candidatos por búsqueda: 100 fragmentos → ~60-80 documentos únicos
     const FETCH_LIMIT = 100;
 
-    // Paso 1: expansión de query (opcional) — devuelve keywords jurídicos adicionales
-    let expandedData = null;
-    if (advanced && anthropic) {
-      try { expandedData = await expandQuery(query); }
-      catch (e) { console.error('[expand error]', e.message); }
-    }
+    // Pasos 1+2 en paralelo: expand (Anthropic Haiku) y embedding (OpenAI) son
+    // independientes entre sí — no esperar uno antes del otro ahorra ~3 seg en
+    // modo avanzado (en cold start, donde TLS handshakes dominan la latencia).
+    // expand tiene timeout de 10s con degradación grácil: si Anthropic responde
+    // lento o falla, el modo avanzado simplemente cae a búsqueda básica en vez
+    // de tirar Internal Server Error al cliente.
+    const [expandedData, emb] = await Promise.all([
+      (advanced && anthropic)
+        ? withTimeout(expandQuery(query), 10000, 'expand').catch(e => {
+            console.error('[expand error]', e.message);
+            return null;
+          })
+        : Promise.resolve(null),
+      openai.embeddings.create({
+        model: EMBEDDING_MODEL, input: [query], dimensions: EMBEDDING_DIM
+      })
+    ]);
 
-    // Paso 2: búsqueda vectorial con query original
-    const emb = await openai.embeddings.create({
-      model: EMBEDDING_MODEL, input: [query], dimensions: EMBEDDING_DIM
-    });
+    // Búsqueda vectorial con query original
     const raw1 = await qdrant.search(COLLECTION, {
       vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
     });
@@ -333,16 +352,21 @@ app.post('/api/search', async (req, res) => {
       })
       .map(r => bestVectorFrag[r.document_id || r.filename] || r);
 
-    // Pool más amplio en modo avanzado para no descartar candidatos por el límite
+    // Pool más amplio en modo avanzado para no descartar candidatos por el límite.
+    // rerankSize fijo en 25 (antes 35 con advanced): un prompt con 35 fragmentos
+    // saturaba el contexto de Sonnet y agregaba 5-10s de latencia sin mejorar
+    // calidad notablemente. 25 da buena precisión y responde más rápido.
     const poolSize   = advanced ? 80 : 30;
-    const rerankSize = advanced ? 35 : 25;
+    const rerankSize = 25;
     let results = unique.slice(0, Math.max(Number(limit), poolSize));
 
-    // Re-ranking con Claude (opcional)
+    // Re-ranking con Claude (opcional). Timeout de 25s con degradación grácil:
+    // si Sonnet tarda demasiado, devolvemos los resultados sin rerank en lugar
+    // de hacer esperar al cliente o tirar 500.
     if (rerank && anthropic && results.length > 0) {
       try {
         const top = results.slice(0, rerankSize);
-        const ranks = await rerankWithClaude(query, top);
+        const ranks = await withTimeout(rerankWithClaude(query, top), 25000, 'rerank');
         results = top.map((r, i) => {
           const rank = ranks.find(x => x.index === i + 1);
           return { ...r, claudeScore: rank?.score ?? 0, claudeReason: rank?.reason ?? '' };
