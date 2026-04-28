@@ -447,7 +447,15 @@ async function main() {
       }));
 
       // ── Upsert ──
-      await withRetry(() => qdrant.upsert(COLLECTION, { wait: true, points }));
+      // Batchear el upsert para evitar exceder el body size limit de Qdrant.
+      // Un libro grande (1490 págs) puede producir 2500+ chunks con vectores
+      // de 3072 dims cada uno = >30 MB en una sola request. Qdrant rechaza
+      // requests grandes con 400 "Bad Request". Subimos en lotes de 100.
+      const UPSERT_BATCH = 100;
+      for (let u = 0; u < points.length; u += UPSERT_BATCH) {
+        const slice = points.slice(u, u + UPSERT_BATCH);
+        await withRetry(() => qdrant.upsert(COLLECTION, { wait: true, points: slice }));
+      }
       processed++;
       const splitNote = splitsApplied > 0 ? ` (${splitsApplied} splits aplicados)` : '';
       console.log(
