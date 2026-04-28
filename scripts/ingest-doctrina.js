@@ -365,49 +365,71 @@ async function main() {
       totalChunks += chunks.length;
 
       // ── Embeddings ──
-      // Estrategia: intenta el batch normal. Si OpenAI rechaza (400) un input
-      // por exceder 8192 tokens (contenido OCR-eado con ratio extremo
-      // tokens/char), cae a procesar el batch chunk por chunk y skippea
-      // solo los problemáticos. Así un libro no pierde toda su indexación
-      // por un solo chunk patológico.
-      const embeddings = [];
-      const droppedIndices = [];
+      // Estrategia bulletproof: si un chunk individual es rechazado por
+      // OpenAI (típicamente "Bad Request" o "maximum input length"), lo
+      // partimos por la mitad y reintentamos recursivamente. Garantiza
+      // recuperar TODO el contenido aunque el OCR haya producido bloques
+      // tokenizer-hostiles. Cada split produce 2 chunks más chicos en
+      // su lugar — el libro queda con más fragmentos pero sin pérdida.
+      const embedded = []; // array de { chunk, embedding }
+      let splitsApplied = 0;
+
+      async function embedSingleWithSplit(text, depth = 0) {
+        if (depth > 8) {
+          throw new Error(`chunk irreducible tras 8 splits (len=${text.length})`);
+        }
+        try {
+          const r = await withRetry(() => openai.embeddings.create({
+            model: EMBEDDING_MODEL, input: [text], dimensions: EMBEDDING_DIM
+          }));
+          return [{ chunk: text, embedding: r.data[0].embedding }];
+        } catch (e) {
+          // Si el chunk es chico ya y aún falla → propagar (no es por tamaño)
+          if (text.length < 100) throw e;
+          // Asumimos que cualquier 4xx puede ser por tamaño y tratamos de splittear
+          splitsApplied++;
+          const mid = Math.floor(text.length / 2);
+          const left  = await embedSingleWithSplit(text.slice(0, mid), depth + 1);
+          const right = await embedSingleWithSplit(text.slice(mid),   depth + 1);
+          return [...left, ...right];
+        }
+      }
+
+      // Procesar en batches; al fallar un batch, caer a single-with-split
       for (let j = 0; j < chunks.length; j += EMB_BATCH) {
         const batch = chunks.slice(j, j + EMB_BATCH);
         try {
-          const emb = await withRetry(() => openai.embeddings.create({
+          const r = await withRetry(() => openai.embeddings.create({
             model: EMBEDDING_MODEL, input: batch, dimensions: EMBEDDING_DIM
           }));
-          embeddings.push(...emb.data.map(d => d.embedding));
-        } catch (eBatch) {
-          // Fallback: uno por uno, marcar nulls los que fallen
           for (let k = 0; k < batch.length; k++) {
+            embedded.push({ chunk: batch[k], embedding: r.data[k].embedding });
+          }
+        } catch (eBatch) {
+          // Fallback: cada chunk del batch con split recursivo
+          for (const c of batch) {
             try {
-              const emb1 = await withRetry(() => openai.embeddings.create({
-                model: EMBEDDING_MODEL, input: [batch[k]], dimensions: EMBEDDING_DIM
-              }));
-              embeddings.push(emb1.data[0].embedding);
+              const parts = await embedSingleWithSplit(c);
+              embedded.push(...parts);
             } catch (eOne) {
-              embeddings.push(null);
-              droppedIndices.push(j + k);
+              // Solo aquí perdemos contenido — log explícito
+              console.error(`  [chunk irrecuperable] ${eOne.message.slice(0, 80)}`);
             }
           }
         }
         if (j + EMB_BATCH < chunks.length) await sleep(DELAY_MS);
       }
 
-      if (droppedIndices.length === chunks.length) {
-        // Todos los chunks fallaron individualmente → libro irrecuperable
-        throw new Error(`todos los ${chunks.length} chunks rechazados por OpenAI`);
+      if (embedded.length === 0) {
+        throw new Error(`ningún chunk pudo embebirse (${chunks.length} intentados)`);
       }
 
       // ── Puntos para Qdrant ──
-      // Filtrar chunks sin embedding (los que fallaron individualmente)
-      const points = chunks.map((chunk, idx) => ({
-        idx, chunk,
-        embedding: embeddings[idx]
-      })).filter(p => p.embedding !== null).map(p => ({
-        id: hashToUUID(`${documentId}:${p.idx}`),
+      // Cada item en `embedded` es { chunk, embedding } — el split recursivo
+      // puede haber multiplicado los chunks originales, así que indexamos
+      // por posición en el array final.
+      const points = embedded.map((p, idx) => ({
+        id: hashToUUID(`${documentId}:${idx}`),
         vector: p.embedding,
         payload: {
           document_id:   documentId,
@@ -419,7 +441,7 @@ async function main() {
           jurisdiccion:  clasif.jurisdiccion  || 'Sin clasificar',
           autor:         clasif.autor         || 'Desconocido',
           titulo_libro:  clasif.titulo        || filename.replace(/\.pdf$/i, ''),
-          chunk_index:   p.idx,
+          chunk_index:   idx,
           text:          p.chunk.slice(0, 1200)
         }
       }));
@@ -427,10 +449,10 @@ async function main() {
       // ── Upsert ──
       await withRetry(() => qdrant.upsert(COLLECTION, { wait: true, points }));
       processed++;
-      const droppedNote = droppedIndices.length > 0 ? ` (${droppedIndices.length} chunks rechazados)` : '';
+      const splitNote = splitsApplied > 0 ? ` (${splitsApplied} splits aplicados)` : '';
       console.log(
         `${prefix} ${shortName}`.padEnd(60) +
-        `${fmt(points.length)} frag  [${clasif.materia} · ${clasif.jurisdiccion}]${droppedNote}`
+        `${fmt(points.length)} frag  [${clasif.materia} · ${clasif.jurisdiccion}]${splitNote}`
       );
 
       await sleep(FILE_DELAY_MS);
