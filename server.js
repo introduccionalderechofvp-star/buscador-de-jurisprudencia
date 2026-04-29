@@ -300,9 +300,18 @@ app.post('/api/search', async (req, res) => {
       quantization: { rescore: false, oversampling: 2.0 }
     };
 
-    const raw1 = await qdrant.search(COLLECTION, {
-      vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true,
-      params: SEARCH_PARAMS
+    const raw1 = await withTimeout(
+      qdrant.search(COLLECTION, {
+        vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true,
+        params: SEARCH_PARAMS
+      }),
+      20000, 'qdrant-vector'
+    ).catch(e => {
+      // Si el vector search falla, seguimos con array vacío. El keyword search
+      // puede salvar la query. Si los dos fallan, devolvemos resultado vacío
+      // (mejor que tirar 500 al cliente).
+      console.error('[vector search error]', e.message);
+      return [];
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
 
@@ -324,13 +333,16 @@ app.post('/api/search', async (req, res) => {
           should: enrichedKw.map(kw => ({ key: 'text', match: { text: kw } })),
           ...(filter?.must?.length ? { must: filter.must } : {})
         };
-        const rawKw = await qdrant.search(COLLECTION, {
-          vector: emb.data[0].embedding,
-          limit: FETCH_LIMIT,
-          filter: kwFilter,
-          with_payload: true,
-          params: SEARCH_PARAMS
-        });
+        const rawKw = await withTimeout(
+          qdrant.search(COLLECTION, {
+            vector: emb.data[0].embedding,
+            limit: FETCH_LIMIT,
+            filter: kwFilter,
+            with_payload: true,
+            params: SEARCH_PARAMS
+          }),
+          15000, 'qdrant-keyword'
+        );
         if (rawKw.length > 0) keywordList = rawKw.map(r => ({ score: r.score, ...r.payload }));
       } catch (e) { console.error('[keyword search error]', e.message); }
     }
