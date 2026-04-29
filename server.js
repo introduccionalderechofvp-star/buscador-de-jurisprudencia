@@ -290,9 +290,19 @@ app.post('/api/search', async (req, res) => {
       })
     ]);
 
-    // Búsqueda vectorial con query original
+    // Búsqueda vectorial con query original.
+    // search_params.quantization fuerza usar solo int8 (rápido, todo en RAM con
+    // always_ram=true) sin rescorear contra los vectores originales en disco.
+    // El disco del VPS es lento — rescorear agregaba 10-15s a cada query cold.
+    // oversampling=2.0 compensa la pérdida de precisión: pide el doble de
+    // candidatos al HNSW para que los buenos casi seguro estén en el set.
+    const SEARCH_PARAMS = {
+      quantization: { rescore: false, oversampling: 2.0 }
+    };
+
     const raw1 = await qdrant.search(COLLECTION, {
-      vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true
+      vector: emb.data[0].embedding, limit: FETCH_LIMIT, filter, with_payload: true,
+      params: SEARCH_PARAMS
     });
     const list1 = raw1.map(r => ({ score: r.score, ...r.payload }));
 
@@ -318,7 +328,8 @@ app.post('/api/search', async (req, res) => {
           vector: emb.data[0].embedding,
           limit: FETCH_LIMIT,
           filter: kwFilter,
-          with_payload: true
+          with_payload: true,
+          params: SEARCH_PARAMS
         });
         if (rawKw.length > 0) keywordList = rawKw.map(r => ({ score: r.score, ...r.payload }));
       } catch (e) { console.error('[keyword search error]', e.message); }
