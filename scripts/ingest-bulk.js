@@ -93,6 +93,11 @@ function chunkText(text) {
   return chunks;
 }
 
+// Encuentra archivos indexables: PDFs (binarios), o markdown/text (ya extraídos).
+// Permite tener corpus heterogéneo — algunas salas como PDF, otras como .md
+// pre-convertido (ahorra disco en VPS para corpus grandes como Consejo de Estado).
+const INDEXABLE_EXTS = ['.pdf', '.md', '.txt'];
+
 function findPDFs(dir) {
   const results = [];
   for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
@@ -100,9 +105,28 @@ function findPDFs(dir) {
     if (entry.name.startsWith('._')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) results.push(...findPDFs(full));
-    else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) results.push(full);
+    else if (entry.isFile() && INDEXABLE_EXTS.includes(path.extname(entry.name).toLowerCase())) {
+      results.push(full);
+    }
   }
   return results;
+}
+
+// Extrae el texto de un archivo según su extensión.
+//   .pdf  → pdf-parse (texto extraído del binario)
+//   .md   → leer raw como UTF-8 (asume que ya está pre-procesado)
+//   .txt  → idem
+async function extractText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.pdf') {
+    const buffer = fs.readFileSync(filePath);
+    const parsed = await pdf(buffer);
+    return (parsed.text || '').trim();
+  }
+  if (ext === '.md' || ext === '.txt') {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  }
+  throw new Error(`extensión no soportada: ${ext}`);
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -239,9 +263,7 @@ async function main() {
 
         let text;
         try {
-          const buffer = fs.readFileSync(filePath);
-          const parsed = await pdf(buffer);
-          text = parsed.text?.trim() || '';
+          text = await extractText(filePath);
         } catch (e) {
           console.log(prefix + `ERROR lectura: ${e.message.slice(0,60)}`);
           totalErrors++;

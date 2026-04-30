@@ -108,6 +108,9 @@ async function withRetry(fn, maxAttempts = 3) {
   throw lastErr;
 }
 
+// Acepta PDFs (binarios), markdown y texto plano (ya extraídos).
+const INDEXABLE_EXTS = ['.pdf', '.md', '.txt'];
+
 function findPDFs(dir) {
   const results = [];
   if (!fs.existsSync(dir)) return results;
@@ -115,9 +118,25 @@ function findPDFs(dir) {
     if (entry.name.startsWith('.') || entry.name.startsWith('._')) continue;
     const full = path.join(dir, entry.name);
     if (entry.isDirectory()) results.push(...findPDFs(full));
-    else if (entry.isFile() && entry.name.toLowerCase().endsWith('.pdf')) results.push(full);
+    else if (entry.isFile() && INDEXABLE_EXTS.includes(path.extname(entry.name).toLowerCase())) {
+      results.push(full);
+    }
   }
   return results;
+}
+
+// Extrae texto del archivo según su extensión. PDF → pdf-parse; .md/.txt → raw UTF-8.
+async function extractText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  if (ext === '.pdf') {
+    const buf = fs.readFileSync(filePath);
+    const parsed = await pdfParse(buf);
+    return (parsed.text || '').trim();
+  }
+  if (ext === '.md' || ext === '.txt') {
+    return fs.readFileSync(filePath, 'utf8').trim();
+  }
+  throw new Error(`extensión no soportada: ${ext}`);
 }
 
 // ─── Estado persistente ──────────────────────────────────────────────────────
@@ -315,19 +334,20 @@ async function main() {
     const prefix   = `[${i + 1}/${pdfs.length}]`;
     const shortName = filename.length > 42 ? filename.slice(0, 39) + '...' : filename;
 
+    const fileExt = path.extname(pdfPath).toLowerCase();
+    const isPdf = fileExt === '.pdf';
+
     try {
-      // ── OCR ──
-      if (!SKIP_OCR) {
+      // ── OCR ── (solo aplicable a PDFs; .md/.txt ya tienen texto extraído)
+      if (!SKIP_OCR && isPdf) {
         const ocrResult = runOCR(pdfPath);
         if (ocrResult === 'ocr-applied')     ocrApplied++;
         else if (ocrResult === 'already-has-text') ocrHadText++;
         else                                  ocrErrors++;
       }
 
-      // ── Extraer texto ──
-      const buf  = fs.readFileSync(pdfPath);
-      const data = await pdfParse(buf);
-      const text = data.text?.trim() || '';
+      // ── Extraer texto (rama por extensión) ──
+      const text = await extractText(pdfPath);
 
       if (text.length < 50) {
         console.log(`${prefix} ${shortName}`.padEnd(60) + 'texto insuficiente — saltado');

@@ -168,8 +168,10 @@ app.get('/api/download', (req, res) => {
   });
 });
 
-// Devuelve el texto OCR'izado completo de un PDF — para que un LLM pueda
-// leer la sentencia entera, no solo el chunk truncado de la búsqueda.
+// Devuelve el texto completo del documento — para que un LLM pueda leer la
+// sentencia/libro entero, no solo el chunk truncado de la búsqueda.
+// Soporta PDF (extrae con pdf-parse) y .md/.txt (lee directo, más rápido y
+// sin necesidad de OCR — útil para corpus pre-procesados como Consejo de Estado).
 app.get('/api/document/text', async (req, res) => {
   const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
@@ -178,14 +180,25 @@ app.get('/api/document/text', async (req, res) => {
     return res.status(403).json({ error: 'Acceso denegado.' });
   }
   try {
-    const buffer = await fs.promises.readFile(filePath);
-    const parsed = await pdf(buffer);
-    const text = (parsed.text || '').trim();
+    const ext = path.extname(filePath).toLowerCase();
+    let text, numPages = 0;
+
+    if (ext === '.pdf') {
+      const buffer = await fs.promises.readFile(filePath);
+      const parsed = await pdf(buffer);
+      text = (parsed.text || '').trim();
+      numPages = parsed.numpages || 0;
+    } else if (ext === '.md' || ext === '.txt') {
+      text = (await fs.promises.readFile(filePath, 'utf8')).trim();
+    } else {
+      return res.status(415).json({ error: `Formato no soportado: ${ext}` });
+    }
+
     res.json({
       filename:  path.basename(filePath),
       file_path: rel,
       organo:    rel.split('/')[0] || null,
-      num_pages: parsed.numpages || 0,
+      num_pages: numPages,
       num_chars: text.length,
       full_text: text
     });
