@@ -143,6 +143,17 @@ async function ensureCollection(qdrant) {
     });
     console.log(`  Colección "${COLLECTION}" creada.`);
   }
+  // Sin este índice, isIndexed() hace full-scan de toda la colección en cada
+  // llamada → 60s/archivo a 1M+ puntos. Con índice keyword: ~20ms. Idempotente:
+  // Qdrant ignora si ya existe.
+  try {
+    await qdrant.createPayloadIndex(COLLECTION, {
+      field_name: 'document_id',
+      field_schema: 'keyword'
+    });
+  } catch (e) {
+    if (!/already exists|exists/i.test(e.message || '')) throw e;
+  }
 }
 
 async function isIndexed(qdrant, documentId) {
