@@ -96,6 +96,7 @@ const TOOLS = [
             '  - "Sala Laboral - Corte Suprema de Justicia"\n' +
             '  - "Sala Penal - Corte Suprema de Justicia"\n' +
             '  - "Sala Tutelas - Corte Suprema de Justicia"\n' +
+            '  - "Consejo de Estado"\n' +
             '  - "Sala Civil - Tribunal Superior de Medellín"\n' +
             '  - "Sala Laboral - Tribunal Superior de Medellín"\n' +
             '  - "Sala Penal - Tribunal Superior de Medellín"\n' +
