@@ -156,10 +156,26 @@ async function ensureCollection() {
   }
 }
 
+// Resuelve un path relativo de uploads/ a un path absoluto en disco. Si el
+// archivo no existe y termina en .pdf, prueba con .md/.txt del mismo basename
+// (algunas salas se convirtieron a markdown para liberar disco — la búsqueda
+// en Qdrant sigue apuntando al .pdf original, así que el server hace fallback).
+function resolveFilePath(rel) {
+  const abs = path.resolve(UPLOADS_DIR, rel);
+  if (fs.existsSync(abs)) return abs;
+  if (/\.pdf$/i.test(abs)) {
+    for (const ext of ['.md', '.txt']) {
+      const alt = abs.replace(/\.pdf$/i, ext);
+      if (fs.existsSync(alt)) return alt;
+    }
+  }
+  return abs;
+}
+
 app.get('/api/download', (req, res) => {
   const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
-  const filePath = path.resolve(UPLOADS_DIR, rel);
+  const filePath = resolveFilePath(rel);
   if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
     return res.status(403).json({ error: 'Acceso denegado.' });
   }
@@ -175,7 +191,7 @@ app.get('/api/download', (req, res) => {
 app.get('/api/document/text', async (req, res) => {
   const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
-  const filePath = path.resolve(UPLOADS_DIR, rel);
+  const filePath = resolveFilePath(rel);
   if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
     return res.status(403).json({ error: 'Acceso denegado.' });
   }
