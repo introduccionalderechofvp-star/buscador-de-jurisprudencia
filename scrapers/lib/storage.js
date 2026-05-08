@@ -85,12 +85,16 @@ export function relativePath(organo, año, filename) {
  * Construye un Set con los nombres "base" (filename SIN extensión) de todas
  * las sentencias presentes en cualquier nivel bajo `uploads/<organo>/`.
  *
- * Se incluyen archivos .pdf, .docx y .doc, con el basename normalizado a
- * minúsculas para comparación case-insensitive. Eso permite al scraper tratar
- * una sentencia como "ya existente" sin importar en qué formato esté guardada
- * ni dónde en el árbol viva. Ejemplo:
+ * Se incluyen archivos .pdf, .docx, .doc, .md y .txt, con el basename
+ * normalizado a minúsculas para comparación case-insensitive. Eso permite al
+ * scraper tratar una sentencia como "ya existente" sin importar en qué formato
+ * esté guardada ni dónde en el árbol viva. Las extensiones .md/.txt cubren el
+ * caso de salas convertidas a markdown para liberar disco — el scraper sabe
+ * que SC5208-2017.md es la misma sentencia que SC5208-2017.pdf y aplica
+ * early-stop correctamente. Ejemplo:
  *
  *   uploads/<organo>/2017/SC5208-2017.pdf        → "sc5208-2017"
+ *   uploads/<organo>/2021/SL3063-2021.md         → "sl3063-2021"
  *   uploads/<organo>/.../TodosLosAños/X.docx     → "x"
  *   uploads/<organo>/2020/Y.DOC                  → "y"
  *
@@ -104,7 +108,7 @@ export function buildBasenameIndex(organo) {
   const names = new Set();
   if (!fs.existsSync(base)) return names;
 
-  const SUPPORTED_EXT = /\.(pdf|docx|doc)$/i;
+  const SUPPORTED_EXT = /\.(pdf|docx|doc|md|txt)$/i;
 
   function walk(dir) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
