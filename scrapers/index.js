@@ -42,7 +42,12 @@ const SCRAPERS = [
   {
     name: 'Corte Suprema de Justicia',
     run: runCorteSuprema,
-    printSummary: printCorteSuprema
+    printSummary: printCorteSuprema,
+    // CSJ_SALAS=Civil,Laboral,Penal limita a esas tres (omite Tutelas, p.ej.).
+    // Sin la env var, el scraper usa su default (las 4 salas).
+    options: process.env.CSJ_SALAS
+      ? { salas: process.env.CSJ_SALAS.split(',').map(s => s.trim()).filter(Boolean) }
+      : {}
   }
   // Futuros scrapers:
   // { name: 'Corte Constitucional', run: runCorteConstitucional, ... },
@@ -65,7 +70,7 @@ async function main() {
 
   for (const scraper of SCRAPERS) {
     try {
-      const result = await scraper.run({ incremental: true });
+      const result = await scraper.run({ incremental: true, ...(scraper.options || {}) });
       scraper.printSummary(result);
       totalDownloaded += result.totals.downloaded;
       totalErrors     += result.totals.errors;
