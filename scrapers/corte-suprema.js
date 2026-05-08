@@ -407,6 +407,12 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
   let unsupportedSkipped = 0;
   let dupInRun           = 0;
   let earlyStop          = false;
+  // Umbral de "ya-existentes consecutivos" antes de disparar early-stop.
+  // Default 5 cubre los casos donde la API devuelve algunas sentencias
+  // recientes mezcladas con otras republicadas/editadas más antiguas.
+  // Configurable vía env var EARLY_STOP_THRESHOLD para investigación.
+  const earlyStopThreshold = Math.max(1, Number(process.env.EARLY_STOP_THRESHOLD || 5));
+  let consecutiveExisting  = 0;
   let abortedBySala      = false;
   let consecutiveErrors  = 0;
 
@@ -436,7 +442,7 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
       for (const [groupKey, group] of groups) {
         if (downloaded + alreadyExists >= max) break;
 
-        // 1. ¿Ya existía antes de esta corrida? → dispara early-stop (incremental)
+        // 1. ¿Ya existía antes de esta corrida? → cuenta hacia el early-stop
         if (existingBeforeRun.has(groupKey)) {
           if (!downloadedThisRun.has(groupKey)) {
             alreadyExists++;
@@ -446,9 +452,14 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
             continue;
           }
           if (incremental) {
-            console.log(`    [existe] ${group.base} → early-stop activado`);
-            earlyStop = true;
-            break;
+            consecutiveExisting++;
+            if (consecutiveExisting >= earlyStopThreshold) {
+              console.log(`    [existe] ${group.base} → ${consecutiveExisting} consecutivos, early-stop activado`);
+              earlyStop = true;
+              break;
+            }
+            console.log(`    [existe] ${group.base} (${consecutiveExisting}/${earlyStopThreshold})`);
+            continue;
           }
           console.log(`    [skip]   ya existe: ${group.base}`);
           continue;
@@ -459,6 +470,9 @@ async function scrapeSala({ sala, query, ano, magistrado, max, incremental, noAb
           dupInRun++;
           continue;
         }
+
+        // Encontramos algo nuevo: reseteamos el contador de consecutivos
+        consecutiveExisting = 0;
 
         // 3. Intentar descargar/convertir en orden de preferencia
         const result = await processGroup({
