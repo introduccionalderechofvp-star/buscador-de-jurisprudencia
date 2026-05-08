@@ -24,7 +24,7 @@ import { buildBasenameIndex } from '../scrapers/lib/storage.js';
 import path from 'node:path';
 import fs from 'node:fs';
 
-const API_SEARCH = 'https://consultajurisprudencial.ramajudicial.gov.co:443/WebRelatoria/services/search/';
+const API_SEARCH = 'https://consultaprovidenciasbk.cortesuprema.gov.co/api';
 const PAGE_SIZE  = 10;
 
 const args = process.argv.slice(2);
