@@ -7,11 +7,15 @@
  *
  *   https://publicacionesprocesales.ramajudicial.gov.co/web/publicaciones-procesales/
  *
- * Este portal lista publicaciones de cualquier despacho judicial colombiano,
- * filtrable por idDespacho. Para Sala Civil del Tribunal Sup. de Medellín:
- *   idDespacho = 050012203000
+ * Despacho: 050012203000 ("Sala Civil del Tribunal Superior de Medellín")
+ * Estructura: 6098957 ("Notificaciones por Estado")
  *
- * Para cada "publicación" (Notificación por Estado), el portal expone:
+ * El listado de "Notificaciones por Estado" no se publica como HTML semántico
+ * sino como un blob JS de Liferay con objetos PublicacionesVO. Cada VO tiene
+ * articleId + fechaRadicado + title. El parser extrae esos campos y construye
+ * la URL del detalle.
+ *
+ * Para cada Notificación, el detalle expone:
  *   - El PDF del estado en sí (lista de notificaciones del día) -> SE OMITE
  *   - Las providencias (autos/sentencias) asociadas en PDF       -> SE DESCARGAN
  *
@@ -33,7 +37,6 @@
 import 'dotenv/config';
 import { parseArgs } from 'node:util';
 import path from 'node:path';
-import fs from 'node:fs';
 
 import { fetchWithRetry, fetchBuffer } from './lib/http.js';
 import { readState, writeState, acquireLock, releaseLock } from './lib/state.js';
@@ -42,6 +45,7 @@ import { safeName, buildBasenameIndex, saveAtomic } from './lib/storage.js';
 const ORGANO       = 'Sala Civil - Tribunal Superior de Medellín';
 const STATE_NAME   = 'tribunal-medellin-civil';
 const ID_DESPACHO  = '050012203000';
+const ID_STRUCTURE = '6098957';   // "Notificaciones por Estado" en este portal
 const PORTAL_BASE  = 'https://publicacionesprocesales.ramajudicial.gov.co';
 const PORTLET_INSTANCE =
   'co_com_avanti_efectosProcesales_PublicacionesEfectosProcesalesPortletV2_INSTANCE_BIyXQFHVaYaq';
@@ -57,9 +61,7 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 async function fetchText(url) {
   const res = await fetchWithRetry(url, {
-    headers: {
-      'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8'
-    }
+    headers: { 'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8' }
   }, { timeoutMs: 60_000 });
   return res.text();
 }
@@ -71,7 +73,10 @@ function buildSearchUrl({ page = 1, fromDate = '', toDate = '' }) {
   sp.set('p_p_lifecycle', '0');
   sp.set('p_p_state', 'normal');
   sp.set('p_p_mode', 'view');
-  sp.set(`${PORTLET_PREFIX}action`, 'busqueda');
+  // filterStructures + idStructure restringe a "Notificaciones por Estado".
+  // Sin esto el portal mezcla otras estructuras y el conteo es inconsistente.
+  sp.set(`${PORTLET_PREFIX}action`, 'filterStructures');
+  sp.set(`${PORTLET_PREFIX}idStructure`, ID_STRUCTURE);
   sp.set(`${PORTLET_PREFIX}verTotales`, 'true');
   sp.set(`${PORTLET_PREFIX}cur`, String(page));
   sp.set(`${PORTLET_PREFIX}delta`, String(PAGE_SIZE));
@@ -86,23 +91,56 @@ function buildSearchUrl({ page = 1, fromDate = '', toDate = '' }) {
   return url.href;
 }
 
-function getTotalPages(html) {
-  const m = html.match(/P[áa]gina\s+\d+\s+de\s+(\d+)/i);
-  return m ? Number(m[1]) : 1;
+function buildDetailUrl(articleId) {
+  const url = new URL(`${PORTAL_BASE}/web/publicaciones-procesales/inicio`);
+  const sp = url.searchParams;
+  sp.set('p_p_id', PORTLET_INSTANCE);
+  sp.set('p_p_lifecycle', '0');
+  sp.set('p_p_state', 'normal');
+  sp.set('p_p_mode', 'view');
+  sp.set(`${PORTLET_PREFIX}jspPage`, '/META-INF/resources/detail.jsp');
+  sp.set(`${PORTLET_PREFIX}articleId`, articleId);
+  return url.href;
+}
+
+function decodeJsEscapes(s) {
+  // Liferay serializa los VO con escapes JS: \x3d, ó, etc.
+  return String(s)
+    .replace(/\\x([0-9a-fA-F]{2})/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+    .replace(/\\u([0-9a-fA-F]{4})/g, (_, h) => String.fromCharCode(parseInt(h, 16)));
 }
 
 function decodeEntities(s) {
   return s
     .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ')
-    .replace(/&aacute;/g, 'á').replace(/&eacute;/g, 'é').replace(/&iacute;/g, 'í')
-    .replace(/&oacute;/g, 'ó').replace(/&uacute;/g, 'ú').replace(/&ntilde;/g, 'ñ')
-    .replace(/&Aacute;/g, 'Á').replace(/&Eacute;/g, 'É').replace(/&Iacute;/g, 'Í')
-    .replace(/&Oacute;/g, 'Ó').replace(/&Uacute;/g, 'Ú').replace(/&Ntilde;/g, 'Ñ');
+    .replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&nbsp;/g, ' ');
 }
 
-function plainText(html) {
-  return decodeEntities(html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
+/**
+ * Extrae las entradas PublicacionesVO del blob JS del listado.
+ *
+ * Cada entrada tiene formato:
+ *   PublicacionesVO [title=..., summary=..., radicado=null, fechaRadicado=YYYY-MM-DD,
+ *                    entry=null, articleId=NNN, codDepto=..., ...]
+ *
+ * Los campos están separados por ", " pero los valores también pueden tener comas
+ * (ej: en title), así que extraemos por nombre de campo conocido.
+ */
+function parsePublicacionesVO(html) {
+  const entries = [];
+  const blockRx = /PublicacionesVO\s*\\?\[([\s\S]*?)\\?\]/g;
+  let m;
+  while ((m = blockRx.exec(html))) {
+    const body = decodeJsEscapes(m[1]);
+    const articleId = body.match(/articleId\s*=\s*(\d+)/)?.[1];
+    if (!articleId) continue;
+    const fechaRadicado = body.match(/fechaRadicado\s*=\s*(\d{4}-\d{2}-\d{2})/)?.[1] || '';
+    // title termina con ", summary=" — capturamos hasta ahí
+    const titleMatch = body.match(/title\s*=\s*([\s\S]*?),\s*summary\s*=/);
+    const title = titleMatch ? titleMatch[1].trim() : '';
+    entries.push({ articleId, fechaRadicado, title });
+  }
+  return entries;
 }
 
 function extractAnchors(html) {
@@ -111,24 +149,10 @@ function extractAnchors(html) {
   let m;
   while ((m = rx.exec(html))) {
     const href = decodeEntities(m[1] || m[2]);
-    const text = plainText(m[3] || '');
+    const text = decodeEntities((m[3] || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim());
     out.push({ href, text });
   }
   return out;
-}
-
-function getDetailLinks(html, baseUrl) {
-  const seen = new Set();
-  const links = [];
-  for (const a of extractAnchors(html)) {
-    let abs;
-    try { abs = new URL(a.href, baseUrl).href; } catch { continue; }
-    if (/detail\.jsp|articleId=/.test(abs) && !seen.has(abs)) {
-      seen.add(abs);
-      links.push(abs);
-    }
-  }
-  return links;
 }
 
 function getPdfLinks(html, baseUrl) {
@@ -147,19 +171,9 @@ function getPdfLinks(html, baseUrl) {
   return links;
 }
 
-function extractDetailMeta(html) {
-  const text = plainText(html);
-  let title = 'Publicación';
-  const mTitle = text.match(/Notificaci[oó]n\s+por\s+Estado\s+No\.?\s*\d+/i);
-  if (mTitle) title = mTitle[0].trim();
-
-  let publicationDate = null;
-  const mDate1 = text.match(/Fecha\s+de\s+Publicaci[oó]n:\s*(\d{4}-\d{2}-\d{2})/i);
-  const mDate2 = !mDate1 ? text.match(/\b(\d{4}-\d{2}-\d{2})\b/) : null;
-  if (mDate1) publicationDate = mDate1[1];
-  else if (mDate2) publicationDate = mDate2[1];
-
-  return { title, publicationDate };
+function getTotalPages(html) {
+  const m = html.match(/P[áa]gina\s+\d+\s+de\s+(\d+)/i);
+  return m ? Number(m[1]) : 1;
 }
 
 function isStatePdf(name) {
@@ -204,6 +218,7 @@ async function main() {
   }
   if (toDate) console.log(`  Hasta: ${toDate}`);
   console.log(`  Despacho:    ${ID_DESPACHO} (${ORGANO})`);
+  console.log(`  Estructura:  ${ID_STRUCTURE} (Notificaciones por Estado)`);
   console.log(`  Max archivos: ${max}`);
   console.log('');
 
@@ -220,9 +235,9 @@ async function main() {
     let downloaded = 0;
     let skippedExist = 0;
     let skippedState = 0;
-    let skippedNoDate = 0;
+    let skippedNoPdf = 0;
     let errors = 0;
-    let detailsSeen = new Set();
+    let entriesSeen = 0;
     let maxPubDate = prevState?.last_publication_date || fromDate;
     const t0 = Date.now();
 
@@ -232,39 +247,36 @@ async function main() {
     console.log(`  Páginas detectadas: ${totalPages}`);
 
     for (let page = 1; page <= totalPages && downloaded < max; page++) {
-      console.log(`\n  Página ${page}/${totalPages}...`);
-      const pageUrl = buildSearchUrl({ page, fromDate, toDate });
-      const pageHtml = page === 1 ? firstHtml : await fetchText(pageUrl);
-      const detailUrls = getDetailLinks(pageHtml, pageUrl);
-      if (!detailUrls.length) {
-        console.log(`    (sin detalles)`);
-        continue;
-      }
+      const pageHtml = page === 1
+        ? firstHtml
+        : await fetchText(buildSearchUrl({ page, fromDate, toDate }));
 
-      for (const detailUrl of detailUrls) {
+      const entries = parsePublicacionesVO(pageHtml);
+      console.log(`\n  Página ${page}/${totalPages} — ${entries.length} entradas`);
+      if (!entries.length) continue;
+
+      for (const entry of entries) {
         if (downloaded >= max) break;
-        if (detailsSeen.has(detailUrl)) continue;
-        detailsSeen.add(detailUrl);
+        entriesSeen++;
+        const { articleId, fechaRadicado, title } = entry;
+        if (fechaRadicado && fechaRadicado > maxPubDate) maxPubDate = fechaRadicado;
+        const año = fechaRadicado ? fechaRadicado.slice(0, 4) : String(new Date().getFullYear());
 
-        let meta;
+        const detailUrl = buildDetailUrl(articleId);
         let detailHtml;
         try {
           detailHtml = await fetchText(detailUrl);
-          meta = extractDetailMeta(detailHtml);
         } catch (e) {
           errors++;
-          console.log(`    [err detalle] ${e.message.slice(0, 80)}`);
+          console.log(`    [err detalle ${articleId}] ${e.message.slice(0, 80)}`);
           continue;
         }
 
-        if (!meta.publicationDate) skippedNoDate++;
-        const pubDate = meta.publicationDate || '';
-        if (pubDate && pubDate > maxPubDate) maxPubDate = pubDate;
-
         const pdfs = getPdfLinks(detailHtml, detailUrl);
-        if (!pdfs.length) continue;
-
-        const año = pubDate ? pubDate.slice(0, 4) : String(new Date().getFullYear());
+        if (!pdfs.length) {
+          skippedNoPdf++;
+          continue;
+        }
 
         for (const pdf of pdfs) {
           if (downloaded >= max) break;
@@ -278,11 +290,11 @@ async function main() {
             const buffer = await fetchBuffer(pdf.url, {
               headers: { 'Accept-Language': 'es-CO,es;q=0.9,en;q=0.8' }
             }, { timeoutMs: 60_000 });
-            const fullPath = saveAtomic(ORGANO, año, filename, buffer);
+            saveAtomic(ORGANO, año, filename, buffer);
             onDisk.add(key);
             downloaded++;
             const kb = (buffer.length / 1024).toFixed(1);
-            console.log(`    [ok] ${año}/${filename} (${kb} KB)`);
+            console.log(`    [ok] ${año}/${filename} (${kb} KB) — ${fechaRadicado || 'sin fecha'}`);
           } catch (e) {
             errors++;
             console.log(`    [err] ${filename}: ${e.message.slice(0, 80)}`);
@@ -296,10 +308,11 @@ async function main() {
     console.log(`\n═══════════════════════════════════════════════════════════════`);
     console.log(`  RESUMEN — Sala Civil Tribunal Medellín`);
     console.log(`═══════════════════════════════════════════════════════════════`);
+    console.log(`  Entradas procesadas:   ${entriesSeen}`);
     console.log(`  Descargados:           ${downloaded}`);
     console.log(`  Saltados (existían):   ${skippedExist}`);
     console.log(`  Saltados (estados):    ${skippedState}`);
-    console.log(`  Saltados (sin fecha):  ${skippedNoDate}`);
+    console.log(`  Saltados (sin PDFs):   ${skippedNoPdf}`);
     console.log(`  Errores:               ${errors}`);
     console.log(`  Última fecha vista:    ${maxPubDate}`);
     console.log(`  Tiempo:                ${elapsedMin} min`);
