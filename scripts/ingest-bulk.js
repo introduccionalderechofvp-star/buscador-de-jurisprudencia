@@ -17,6 +17,8 @@
  * Opciones de entorno (en .env):
  *   BULK_ORGANO         — fuerza un órgano específico ignorando el nombre de carpeta
  *   BULK_PATH           — procesa solo esta subcarpeta dentro de uploads/
+ *   EXCLUDE_ORGANOS     — lista separada por comas de órganos a omitir
+ *                         (ej: "Sala Tutelas - Corte Suprema de Justicia")
  *   INGEST_FORCE        — equivalente a --force (true/false)
  *   INGEST_CONCURRENCY  — archivos en paralelo (default 1 = secuencial)
  *   INGEST_DELAY_MS     — delay entre sub-lotes de embeddings (default 150)
@@ -189,9 +191,22 @@ async function main() {
     ? path.join(UPLOADS_DIR, process.env.BULK_PATH)
     : UPLOADS_DIR;
 
+  // EXCLUDE_ORGANOS: lista separada por comas de nombres de carpeta a omitir.
+  // Útil para el cron semanal: queremos que ingese CSJ + Tribunal Medellín pero
+  // NO los .md de Tutelas que viven en disco para ir a Gemini File Search.
+  const EXCLUDE_ORGANOS = (process.env.EXCLUDE_ORGANOS || '')
+    .split(',').map(s => s.trim()).filter(Boolean);
+
   const organos = fs.readdirSync(targetDir, { withFileTypes: true })
     .filter(e => e.isDirectory() && e.name !== 'Doctrina')
-    .map(e => e.name);
+    .map(e => e.name)
+    .filter(name => {
+      if (EXCLUDE_ORGANOS.includes(name)) {
+        console.log(`  [exclude] ${name} (por EXCLUDE_ORGANOS)`);
+        return false;
+      }
+      return true;
+    });
 
   if (!organos.length) {
     console.error('No se encontraron subcarpetas en uploads/. Estructura esperada:\n  uploads/<Nombre del órgano>/<año>/*.pdf');
