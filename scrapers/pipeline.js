@@ -5,7 +5,7 @@
  *   PDFs nuevos en disco
  *          │
  *          ▼
- *   scripts/ocr-saltados.js      (OCR si los PDFs no tienen texto)
+ *   scripts/ocr-saltados.js      (OCR — SOLO si RUN_OCR=1; ver nota abajo)
  *          │
  *          ▼
  *   scripts/ingest-bulk.js       (indexa chunks nuevos en Qdrant)
@@ -14,8 +14,14 @@
  *   Sentencias nuevas disponibles en el buscador web + MCP
  *
  * Se dispara solo cuando el orquestador detectó al menos una descarga nueva.
- * Si nadie bajó nada, no tiene sentido correr estos scripts — ambos son
- * idempotentes y no harían nada útil, solo consumirían CPU.
+ *
+ * NOTA SOBRE OCR: las providencias modernas de CSJ y Tribunal vienen como PDF
+ * con capa de texto digital — pdf-parse las lee bien y NUNCA necesitan OCR.
+ * El ocr-saltados.js solo sirve para cargas históricas de PDFs escaneados.
+ * Correrlo en cada cron semanal desperdiciaba ~12 min de CPU verificando una
+ * lista vieja y OCR-izando 0 archivos. Por eso ahora el OCR es opt-in:
+ * solo corre si RUN_OCR=1 en el entorno. Para cargas históricas, correr
+ * ocr-saltados.js a mano.
  *
  * Los scripts se invocan como subprocesos (no import) para aislar su
  * lifecycle y sus variables globales de dotenv/config del orquestador.
@@ -61,12 +67,7 @@ function runNodeScript(scriptPath, label) {
 }
 
 /**
- * Ejecuta los dos scripts downstream en orden: OCR primero (si algún PDF nuevo
- * no tiene texto), luego ingest (indexa todos los nuevos a Qdrant).
- *
- * Si OCR falla, NO se corre el ingest — porque eso podría dejar archivos a
- * medias en Qdrant que después serían difíciles de limpiar. Preferimos que
- * un operador vea el fallo y decida qué hacer antes de indexar.
+ * Ejecuta el ingest de lo nuevo. OCR solo si RUN_OCR=1 (ver nota arriba).
  *
  * Ambos scripts son idempotentes: si los archivos ya están procesados, no
  * hacen trabajo redundante. Eso hace seguro correr la pipeline aun cuando
@@ -78,16 +79,23 @@ export async function runDownstream() {
   const ingestScript = path.join(cwd, 'scripts', 'ingest-bulk.js');
 
   console.log('\n══════════════════════════════════════════════════════════════');
-  console.log('  PIPELINE DOWNSTREAM — OCR → Ingest');
+  console.log('  PIPELINE DOWNSTREAM — Ingest' + (process.env.RUN_OCR === '1' ? ' (con OCR)' : ' (OCR omitido)'));
   console.log('══════════════════════════════════════════════════════════════');
 
   const results = [];
 
-  try {
-    results.push(await runNodeScript(ocrScript, 'OCR (ocr-saltados.js)'));
-  } catch (e) {
-    console.error(`[pipeline] OCR falló. ABORTO — no se corre el ingest.`);
-    throw e;
+  // OCR opt-in. Las providencias nuevas nunca lo necesitan; correrlo en cada
+  // cron era ~12 min de CPU desperdiciados. Para cargas históricas de PDFs
+  // escaneados: correr `RUN_OCR=1` o `node scripts/ocr-saltados.js` a mano.
+  if (process.env.RUN_OCR === '1') {
+    try {
+      results.push(await runNodeScript(ocrScript, 'OCR (ocr-saltados.js)'));
+    } catch (e) {
+      console.error(`[pipeline] OCR falló. ABORTO — no se corre el ingest.`);
+      throw e;
+    }
+  } else {
+    console.log('\n[pipeline] OCR omitido (RUN_OCR != 1). Las providencias nuevas no lo necesitan.');
   }
 
   try {
