@@ -29,6 +29,7 @@ import 'dotenv/config';
 import fs from 'fs';
 import path from 'path';
 import pdf from 'pdf-parse';
+import { convert as htmlToText } from 'html-to-text';
 import OpenAI from 'openai';
 import { QdrantClient } from '@qdrant/js-client-rest';
 import crypto from 'crypto';
@@ -95,10 +96,11 @@ function chunkText(text) {
   return chunks;
 }
 
-// Encuentra archivos indexables: PDFs (binarios), o markdown/text (ya extraídos).
+// Encuentra archivos indexables: PDFs (binarios), markdown/text (ya extraídos),
+// o HTML (legislación con notas de vigencia/derogación que vale conservar).
 // Permite tener corpus heterogéneo — algunas salas como PDF, otras como .md
-// pre-convertido (ahorra disco en VPS para corpus grandes como Consejo de Estado).
-const INDEXABLE_EXTS = ['.pdf', '.md', '.txt'];
+// pre-convertido (ahorra disco), legislación como .html (preserva marcado).
+const INDEXABLE_EXTS = ['.pdf', '.md', '.txt', '.html'];
 
 function findPDFs(dir) {
   const results = [];
@@ -118,6 +120,10 @@ function findPDFs(dir) {
 //   .pdf  → pdf-parse (texto extraído del binario)
 //   .md   → leer raw como UTF-8 (asume que ya está pre-procesado)
 //   .txt  → idem
+//   .html → html-to-text quita tags/scripts/estilos para indexar texto plano.
+//           El .html crudo queda intacto en disco — /api/document/text lo
+//           devuelve sin tocar para preservar notas de vigencia, marcas de
+//           derogación, etc. Solo aquí se aplana para el embedding.
 async function extractText(filePath) {
   const ext = path.extname(filePath).toLowerCase();
   if (ext === '.pdf') {
@@ -127,6 +133,18 @@ async function extractText(filePath) {
   }
   if (ext === '.md' || ext === '.txt') {
     return fs.readFileSync(filePath, 'utf8').trim();
+  }
+  if (ext === '.html') {
+    const html = fs.readFileSync(filePath, 'utf8');
+    return htmlToText(html, {
+      wordwrap: false,
+      selectors: [
+        { selector: 'script', format: 'skip' },
+        { selector: 'style',  format: 'skip' },
+        { selector: 'nav',    format: 'skip' },
+        { selector: 'a',      options: { ignoreHref: true } }
+      ]
+    }).trim();
   }
   throw new Error(`extensión no soportada: ${ext}`);
 }
