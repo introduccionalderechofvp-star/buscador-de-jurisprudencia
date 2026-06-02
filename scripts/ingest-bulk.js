@@ -360,8 +360,16 @@ async function main() {
           }
         }));
 
+        // Batchear el upsert: documentos largos (códigos, leyes) pueden tener
+        // 1000+ chunks. Un único upsert con vectores de 3072-dim float supera
+        // el body limit de Qdrant (Bad Request). Mandando de a UPSERT_BATCH
+        // mantiene cada request manejable.
+        const UPSERT_BATCH = 100;
         try {
-          await qdrant.upsert(COLLECTION, { wait: true, points });
+          for (let b = 0; b < points.length; b += UPSERT_BATCH) {
+            const batch = points.slice(b, b + UPSERT_BATCH);
+            await qdrant.upsert(COLLECTION, { wait: true, points: batch });
+          }
           totalChunks    += points.length;
           totalProcessed++;
           console.log(prefix + `${fmt(points.length)} fragmentos`);
