@@ -383,6 +383,7 @@
         <option>Sala Laboral - Tribunal Superior de Medellín</option>
         <option>Sala Penal - Tribunal Superior de Medellín</option>
         <option>Doctrina</option>
+        <option>Legislación</option>
         <option>Corte Suprema de Justicia</option>
         <option>Otro</option>
       </select>
@@ -408,6 +409,7 @@
       <option>Sala Laboral - Tribunal Superior de Medellín</option>
       <option>Sala Penal - Tribunal Superior de Medellín</option>
       <option>Doctrina</option>
+      <option>Legislación</option>
       <option>Corte Suprema de Justicia</option>
     </select>
     <button class="btn" id="btnSearch" onclick="doSearch()">Buscar</button>
@@ -556,7 +558,7 @@
     if (!terms?.length) return escHtml(text);
 
     const vowelMap = { a:'[aáàäâã]', e:'[eéèëê]', i:'[iíìïî]', o:'[oóòöô]', u:'[uúùüû]', n:'[nñ]' };
-    const stripAccents = s => s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    const stripAccents = s => s.normalize('NFD').replace(/[̀-ͯ]/g, '');
     const escapeRx = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     // Normalizamos el término (sin tildes, minúsculas) antes de construir el patrón,
     // así "obligación" genera un patrón que sí coincide con "OBLIGACIONES" en el texto.
