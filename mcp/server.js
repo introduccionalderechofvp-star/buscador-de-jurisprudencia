@@ -100,10 +100,13 @@ const TOOLS = [
             '  - "Sala Civil - Tribunal Superior de Medellín"\n' +
             '  - "Sala Laboral - Tribunal Superior de Medellín"\n' +
             '  - "Sala Penal - Tribunal Superior de Medellín"\n' +
-            '  Doctrina:\n' +
+            '  Doctrina y legislación:\n' +
             '  - "Doctrina" (libros de texto jurídico — incluye campos adicionales: ' +
             'materia, jurisdiccion, autor, titulo_libro)\n' +
-            'Omitir para buscar en TODAS las fuentes (jurisprudencia + doctrina). ' +
+            '  - "Legislación" (códigos, leyes, decretos en HTML — los archivos ' +
+            'preservan marcas de derogación y notas de vigencia que se ven al ' +
+            'recuperar el texto completo con obtener_texto_completo)\n' +
+            'Omitir para buscar en TODAS las fuentes (jurisprudencia + doctrina + legislación). ' +
             'Si no sabes qué valor usar, primero busca sin filtro y revisa el campo ' +
             '"organo" en los resultados.',
         },
