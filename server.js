@@ -186,8 +186,9 @@ app.get('/api/download', (req, res) => {
 
 // Devuelve el texto completo del documento — para que un LLM pueda leer la
 // sentencia/libro entero, no solo el chunk truncado de la búsqueda.
-// Soporta PDF (extrae con pdf-parse) y .md/.txt (lee directo, más rápido y
-// sin necesidad de OCR — útil para corpus pre-procesados como Consejo de Estado).
+// Soporta PDF (extrae con pdf-parse), .md/.txt (lee directo) y .html
+// (devuelve HTML crudo — preserva <del>, class="derogado", notas de
+// vigencia y cualquier marcado que aporte contexto. Claude sabe leer HTML).
 app.get('/api/document/text', async (req, res) => {
   const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
@@ -204,7 +205,9 @@ app.get('/api/document/text', async (req, res) => {
       const parsed = await pdf(buffer);
       text = (parsed.text || '').trim();
       numPages = parsed.numpages || 0;
-    } else if (ext === '.md' || ext === '.txt') {
+    } else if (ext === '.md' || ext === '.txt' || ext === '.html') {
+      // .html va crudo — los tags son señal útil para legislación
+      // (marcas de derogación, anotaciones de vigencia, secciones).
       text = (await fs.promises.readFile(filePath, 'utf8')).trim();
     } else {
       return res.status(415).json({ error: `Formato no soportado: ${ext}` });
