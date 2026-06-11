@@ -52,6 +52,7 @@ const CONCURRENCY   = Math.max(1, Number(process.env.CONCURRENCY || 1));
 
 // CLI flags
 const DRY_RUN       = process.argv.includes('--dry-run');
+const FORCE         = process.argv.includes('--force');
 const ORGANO_FILTER = process.argv.find(a => a.startsWith('--organo='))?.split('=')[1]
                    || process.argv[process.argv.indexOf('--organo') + 1] || null;
 const LIMIT         = Number(process.argv.find(a => a.startsWith('--limit='))?.split('=')[1]
@@ -167,15 +168,35 @@ function detectarSalvamentoPosicional(text) {
   return text.slice(0, valido).split(/\s+/).filter(Boolean).length;
 }
 
-// ─── Detector por filename (Consejo de Estado) ────────────────────────────────
+// ─── Detector por filename ────────────────────────────────────────────────────
 
-// CE pre-segmenta cada providencia en archivos por sección. El filename
-// contiene "Salvamentodev" o "Aclaraciondev" cuando todo el archivo es
-// un voto separado.
-const FILENAME_SALVAMENTO_RE = /(Salvamentodev|Aclaraciondev|SALVAMENTODEV|ACLARACIONDEV|Aclaracion[_-]de[_-]voto|Salvamento[_-]de[_-]voto)/i;
+// Algunos órganos pre-segmentan providencias o nombran archivos por tipo de
+// pieza, de modo que el filename basta para saber que TODO el documento es un
+// salvamento o aclaración (no solo una sección al final).
+//
+// Las regex son ESPECÍFICAS al patrón típico de cada órgano para evitar falsos
+// positivos:
+//   - "salvamento marítimo", "salvamento de bienes" → NO matchea (regex exige
+//     que después de SALVAMENTO/ACLARACIÓN venga DE VOTO).
+//   - Tribunal Medellín usa filenames humanos con espacios.
+//   - CE pre-segmenta con palabras-clave concatenadas.
+const FILENAME_PATTERNS = {
+  'Consejo de Estado':
+    /(Salvamentodev|Aclaraciondev|SALVAMENTODEV|ACLARACIONDEV|Aclaracion[_-]de[_-]voto|Salvamento[_-]de[_-]voto)/i,
+  'Sala Civil - Tribunal Superior de Medellín':
+    /(SALVAMENTO|ACLARACI[ÓO]N)\s+(?:PARCIAL\s+)?DE\s+VOTO/i,
+  'Sala Laboral - Tribunal Superior de Medellín':
+    /(SALVAMENTO|ACLARACI[ÓO]N)\s+(?:PARCIAL\s+)?DE\s+VOTO/i,
+  'Sala Penal - Tribunal Superior de Medellín':
+    /(SALVAMENTO|ACLARACI[ÓO]N)\s+(?:PARCIAL\s+)?DE\s+VOTO/i,
+};
 
-function esSalvamentoCEPorFilename(filename) {
-  return FILENAME_SALVAMENTO_RE.test(filename);
+function detectarPorFilename(organo, filename) {
+  const re = FILENAME_PATTERNS[organo];
+  if (!re) return null;
+  if (!re.test(filename)) return null;
+  const motivo = organo === 'Consejo de Estado' ? 'filename_CE' : 'filename_tribunal';
+  return { allSalvamento: true, motivo };
 }
 
 // ─── Lógica de marcado ────────────────────────────────────────────────────────
@@ -190,13 +211,10 @@ function esSalvamentoCEPorFilename(filename) {
 async function determinarEstrategia(filePath, organo) {
   const filename = path.basename(filePath);
 
-  if (organo === 'Consejo de Estado') {
-    if (esSalvamentoCEPorFilename(filename)) {
-      return { allSalvamento: true, motivo: 'filename_CE' };
-    }
-    // Si el filename no matchea, cae al detector posicional (sentencias completas
-    // que no fueron pre-segmentadas también existen en CE).
-  }
+  // 1. Intentar detección por filename (rápida, no necesita leer el archivo).
+  //    Si matchea, el doc entero es salvamento. Si no, caemos al posicional.
+  const porFilename = detectarPorFilename(organo, filename);
+  if (porFilename) return porFilename;
 
   let text;
   try {
@@ -334,7 +352,7 @@ async function main() {
   const qdrant = new QdrantClient({ url: QDRANT_URL, apiKey: QDRANT_KEY });
 
   console.log(`\n=== Marcado de salvamentos ===`);
-  console.log(`Modo         : ${DRY_RUN ? 'DRY-RUN (no escribe Qdrant)' : 'REAL (escribe Qdrant)'}`);
+  console.log(`Modo         : ${DRY_RUN ? 'DRY-RUN (no escribe Qdrant)' : 'REAL (escribe Qdrant)'}${FORCE ? ' + FORCE (ignora state)' : ''}`);
   console.log(`Concurrencia : ${CONCURRENCY}`);
   console.log(`Threshold    : ${THRESHOLD_PCT}% (detector posicional)`);
   if (ORGANO_FILTER) console.log(`Órgano       : ${ORGANO_FILTER}`);
@@ -382,7 +400,7 @@ async function main() {
 
         const r = await procesarArchivo(qdrant, filePath, organo, stats);
 
-        if (r.documentId && state.processed.has(r.documentId)) {
+        if (r.documentId && state.processed.has(r.documentId) && !FORCE) {
           stats.yaProcesados++;
           // Log silenciado para no spamear
           continue;
