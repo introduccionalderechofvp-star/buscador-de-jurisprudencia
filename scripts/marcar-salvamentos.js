@@ -410,7 +410,9 @@ async function main() {
             break;
         }
 
-        if (r.documentId) {
+        // Solo trackeamos como "procesado" cuando efectivamente escribimos.
+        // En dry-run el state queda intacto para que el real run procese todo.
+        if (r.documentId && !DRY_RUN) {
           state.processed.add(r.documentId);
           saveCounter++;
           if (saveCounter >= 100) {
@@ -424,7 +426,7 @@ async function main() {
     await Promise.all(Array.from({ length: CONCURRENCY }, () => worker()));
 
     state.stats[organo] = stats;
-    saveState(state);
+    if (!DRY_RUN) saveState(state);
 
     console.log(`  ─ Resumen ${organo}:`);
     console.log(`     Marcados (con salvamento): ${fmt(stats.marcados)}  (${fmt(stats.chunksMarcados)} chunks)`);
@@ -435,7 +437,7 @@ async function main() {
     console.log(`     Errores                  : ${fmt(stats.errores)}`);
   }
 
-  saveState(state);
+  if (!DRY_RUN) saveState(state);
   const elapsed = ((Date.now() - startTime) / 1000 / 60).toFixed(1);
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`Tiempo total: ${elapsed} min`);
