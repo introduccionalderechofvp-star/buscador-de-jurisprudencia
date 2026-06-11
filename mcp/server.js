@@ -73,6 +73,12 @@ const TOOLS = [
       '(filename, organo, file_path, y para doctrina: autor, titulo_libro, materia). ' +
       'Usa el parámetro organo para filtrar por fuente: omítelo para buscar en todo. ' +
       'No usa rerank con Claude (modo económico): el costo por llamada es ~$0.0001. ' +
+      'IMPORTANTE: por defecto se EXCLUYEN fragmentos que provienen de salvamentos ' +
+      'y aclaraciones de voto. Esos son opiniones individuales de magistrados que ' +
+      'NO constituyen la ratio decidendi de la Sala ni precedente vinculante. ' +
+      'Confundirlos con la decisión es un error grave. Si necesitás explícitamente ' +
+      'doctrina disidente (por ejemplo para argumentar un posible cambio de jurisprudencia ' +
+      'o citar opinión minoritaria), pasá incluir_salvamentos:true. ' +
       'Si los resultados no son suficientemente relevantes, considera reformular la consulta ' +
       'con sinónimos jurídicos o términos técnicos equivalentes y volver a buscar.',
     inputSchema: {
@@ -114,6 +120,16 @@ const TOOLS = [
           type: 'number',
           description: `Cuántos fragmentos devolver. Default ${DEFAULT_LIMIT}, máximo ${MAX_LIMIT}.`,
           default: DEFAULT_LIMIT,
+        },
+        incluir_salvamentos: {
+          type: 'boolean',
+          description:
+            'Por defecto false: la búsqueda devuelve solo fragmentos de la ' +
+            'decisión mayoritaria (ratio decidendi). Si true, también incluye ' +
+            'fragmentos provenientes de salvamentos y aclaraciones de voto. ' +
+            'Solo activá esto cuando necesités explícitamente la opinión ' +
+            'disidente o minoritaria de un magistrado.',
+          default: false,
         },
       },
       required: ['query'],
@@ -164,6 +180,7 @@ async function handleBuscarSentencias(args) {
         limit,
         advanced: false, // sin expansión Claude (modo económico)
         rerank: false,   // sin rerank Claude (modo económico)
+        incluir_salvamentos: args.incluir_salvamentos === true,
       }),
     });
   } catch (e) {

@@ -291,15 +291,31 @@ app.post('/api/ingest', upload.array('pdfs', 20), async (req, res) => {
 });
 
 app.post('/api/search', async (req, res) => {
-  const { query, organo, limit = 15, advanced = false, rerank = false } = req.body || {};
+  const {
+    query, organo, limit = 15, advanced = false, rerank = false,
+    incluir_salvamentos = false,
+  } = req.body || {};
   if (!query?.trim()) return res.status(400).json({ error: 'La consulta está vacía.' });
 
   try {
     await ensureCollection();
 
-    const filter = organo && organo !== 'TODAS'
-      ? { must: [{ key: 'organo', match: { value: organo } }] }
-      : undefined;
+    // Filtro Qdrant:
+    //  - must: organo si el cliente lo especifica.
+    //  - must_not: chunks etiquetados como salvamento/aclaración (script
+    //    marcar-salvamentos.js los marca con `tipo_seccion: "salvamento"`).
+    //    Por defecto los excluimos: no son ratio decidendi, y el modelo
+    //    consumidor (Claude) no debe confundirlos con la decisión.
+    //    El cliente puede pedirlos explícitamente con incluir_salvamentos:true.
+    //    Chunks SIN el campo `tipo_seccion` siempre pasan (= asumimos decisión).
+    const filterClauses = {};
+    if (organo && organo !== 'TODAS') {
+      filterClauses.must = [{ key: 'organo', match: { value: organo } }];
+    }
+    if (!incluir_salvamentos) {
+      filterClauses.must_not = [{ key: 'tipo_seccion', match: { value: 'salvamento' } }];
+    }
+    const filter = Object.keys(filterClauses).length > 0 ? filterClauses : undefined;
 
     // Candidatos por búsqueda: 100 fragmentos → ~60-80 documentos únicos
     const FETCH_LIMIT = 100;
@@ -363,7 +379,8 @@ app.post('/api/search', async (req, res) => {
       try {
         const kwFilter = {
           should: enrichedKw.map(kw => ({ key: 'text', match: { text: kw } })),
-          ...(filter?.must?.length ? { must: filter.must } : {})
+          ...(filter?.must?.length     ? { must:     filter.must     } : {}),
+          ...(filter?.must_not?.length ? { must_not: filter.must_not } : {}),
         };
         const rawKw = await withTimeout(
           qdrant.search(COLLECTION, {
