@@ -173,7 +173,11 @@ function resolveFilePath(rel) {
 }
 
 app.get('/api/download', (req, res) => {
-  const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
+  // NO sanitizar `..` del string — path.resolve() ya normaliza y el check
+  // posterior con startsWith(UPLOADS_DIR + sep) bloquea cualquier escape.
+  // Un .replace(/\.\./g, '') rompe filenames legítimos con doble punto
+  // (ej. "Sentencia..pdf" pasa a "Sentencia.pdf" y el archivo no se encuentra).
+  const rel = decodeURIComponent(req.query.path || '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
   const filePath = resolveFilePath(rel);
   if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
@@ -190,7 +194,8 @@ app.get('/api/download', (req, res) => {
 // (devuelve HTML crudo — preserva <del>, class="derogado", notas de
 // vigencia y cualquier marcado que aporte contexto. Claude sabe leer HTML).
 app.get('/api/document/text', async (req, res) => {
-  const rel = decodeURIComponent(req.query.path || '').replace(/\.\./g, '').replace(/^[/\\]/, '');
+  // Mismo criterio que /api/download: path.resolve + startsWith es suficiente.
+  const rel = decodeURIComponent(req.query.path || '').replace(/^[/\\]/, '');
   if (!rel) return res.status(400).json({ error: 'Falta el parámetro path.' });
   const filePath = resolveFilePath(rel);
   if (!filePath.startsWith(UPLOADS_DIR + path.sep) && filePath !== UPLOADS_DIR) {
